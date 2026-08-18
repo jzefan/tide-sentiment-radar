@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>中国股市 GitHub 仓库 · 舆情数据分析报告</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --ink:#1f2937; --muted:#6b7280;
+    --line:#e5e7eb; --brand:#c0392b; --brand2:#1e3a5f; --green:#16a085;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    background:var(--bg); color:var(--ink); line-height:1.6;}
+  .wrap{max-width:1160px; margin:0 auto; padding:0 20px 60px;}
+  header{background:linear-gradient(135deg,#1e3a5f 0%,#2c5282 55%,#3b6ea5 100%); color:#fff; padding:44px 0 40px; margin-bottom:28px;}
+  header .wrap{display:flex; flex-direction:column; gap:8px;}
+  header .kicker{font-size:13px; letter-spacing:2px; color:#f3c1b8; text-transform:uppercase;}
+  header h1{font-size:30px; font-weight:800; letter-spacing:.5px;}
+  header .sub{font-size:14px; color:#cbd5e1; max-width:800px;}
+  header .meta{font-size:12.5px; color:#94a3b8; margin-top:4px;}
+  .accent{color:#f87171;}
+
+  .stats{display:grid; grid-template-columns:repeat(5,1fr); gap:14px; margin-bottom:26px;}
+  .stat{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px 18px;}
+  .stat .num{font-size:24px; font-weight:800; color:var(--brand2);}
+  .stat .num.red{color:var(--brand);}
+  .stat .num.green{color:var(--green);}
+  .stat .lbl{font-size:12.5px; color:var(--muted); margin-top:2px;}
+  @media(max-width:900px){ .stats{grid-template-columns:repeat(3,1fr);} }
+  @media(max-width:560px){ .stats{grid-template-columns:repeat(2,1fr);} }
+
+  .tabs{display:flex; gap:10px; margin-bottom:18px; flex-wrap:wrap;}
+  .tab{border:1px solid var(--line); background:#fff; color:var(--ink); padding:10px 18px; border-radius:999px;
+    font-size:14px; font-weight:600; cursor:pointer; transition:.15s;}
+  .tab.active{background:var(--brand); color:#fff; border-color:var(--brand);}
+  .tab .cnt{opacity:.65; font-weight:500;}
+
+  .controls{display:flex; gap:12px; flex-wrap:wrap; align-items:center; margin-bottom:14px;}
+  .search{flex:1; min-width:200px; position:relative;}
+  .search input{width:100%; padding:10px 14px 10px 38px; border:1px solid var(--line); border-radius:10px; font-size:14px; background:#fff;}
+  .search input:focus{outline:none; border-color:var(--brand2); box-shadow:0 0 0 3px rgba(30,58,95,.08);}
+  .search svg{position:absolute; left:12px; top:50%; transform:translateY(-50%); opacity:.4;}
+  select{border:1px solid var(--line); border-radius:10px; padding:9px 12px; font-size:14px; background:#fff; cursor:pointer; color:var(--ink);}
+  .chip{border:1px solid var(--line); background:#fff; padding:7px 14px; border-radius:999px; font-size:13px; cursor:pointer; color:var(--muted); transition:.12s;}
+  .chip.active{background:var(--brand2); color:#fff; border-color:var(--brand2);}
+
+  .charts{display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-bottom:26px;}
+  @media(max-width:820px){ .charts{grid-template-columns:1fr;} }
+  .chart-card{background:var(--card); border:1px solid var(--line); border-radius:12px; padding:20px;}
+  .chart-card h3{font-size:15px; font-weight:700; margin-bottom:14px; color:var(--brand2);}
+  .hbar{margin-bottom:12px;}
+  .hbar .row{display:flex; align-items:center; font-size:12.5px; margin-bottom:2px; justify-content:space-between;}
+  .hbar .track{height:12px; background:#eef2f7; border-radius:6px; overflow:hidden;}
+  .hbar .fill{height:100%; border-radius:6px; transition:width .4s;}
+  .hbar .val{font-weight:700; color:var(--ink);}
+
+  .table-card{background:var(--card); border:1px solid var(--line); border-radius:12px; overflow:hidden;}
+  .table-head{display:flex; align-items:center; justify-content:space-between; padding:16px 20px; border-bottom:1px solid var(--line);}
+  .table-head .t{font-size:15px; font-weight:700;}
+  .table-head .r{font-size:12.5px; color:var(--muted);}
+  .tbl-wrap{overflow-x:auto;}
+  table{width:100%; border-collapse:collapse; font-size:14px;}
+  thead th{background:#f8fafc; text-align:left; padding:12px 16px; font-size:12.5px; color:var(--muted); font-weight:600;
+    border-bottom:1px solid var(--line); cursor:pointer; white-space:nowrap; user-select:none;}
+  thead th:hover{color:var(--brand2);}
+  thead th .arr{opacity:.35; font-size:10px;}
+  thead th.sorted .arr{opacity:1;}
+  tbody td{padding:12px 16px; border-bottom:1px solid #f1f5f9; vertical-align:top;}
+  tbody tr:hover{background:#f8fafc;}
+  tbody tr:last-child td{border-bottom:none;}
+  tr.inactive td{opacity:.62;}
+  td.name a{color:var(--brand2); font-weight:600; text-decoration:none;}
+  td.name a:hover{text-decoration:underline; color:var(--brand);}
+  .stars{font-weight:700; color:var(--brand); font-variant-numeric:tabular-nums;}
+  .lang{font-size:12px; color:var(--muted); background:#f1f5f9; padding:2px 8px; border-radius:6px; white-space:nowrap;}
+  .tag{display:inline-block; font-size:11.5px; padding:2px 9px; border-radius:999px; white-space:nowrap; font-weight:600;}
+  .tag.forum{background:#fef2f2; color:#b91c1c; border:1px solid #fecaca;}
+  .tag.forum.xq{background:#eef2ff; color:#3730a3; border:1px solid #c7d2fe;}
+  .tag.forum.tgb{background:#ecfdf5; color:#047857; border:1px solid #a7f3d0;}
+  .tag.forum.other{background:#f5f3ff; color:#6d28d9; border:1px solid #ddd6fe;}
+  .tag.forum.generic{background:#f1f5f9; color:#475569; border:1px solid #e2e8f0;}
+  .tag.cat{background:#fff7ed; color:#c2410c; border:1px solid #fed7aa;}
+  .status{display:inline-flex; align-items:center; gap:6px; font-size:12.5px; white-space:nowrap;}
+  .dot{width:8px; height:8px; border-radius:50%; display:inline-block;}
+  .dot.on{background:var(--green);}
+  .dot.off{background:#cbd5e1;}
+  .status .date{color:var(--muted);}
+  .status.live{color:var(--green); font-weight:600;}
+  .status.dead{color:#9ca3af;}
+  .desc{color:var(--muted); font-size:13px;}
+  .empty{padding:40px; text-align:center; color:var(--muted);}
+  .badge-archived{font-size:10.5px; background:#fef3c7; color:#b45309; padding:1px 7px; border-radius:5px; margin-left:4px;}
+  footer{margin-top:26px; font-size:12.5px; color:var(--muted); border-top:1px solid var(--line); padding-top:16px;}
+  footer a{color:var(--brand2);}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <div class="kicker">GitHub Repository Research</div>
+    <h1>中国股市开源仓库 · <span class="accent">股票论坛舆情数据分析</span>专题</h1>
+    <div class="sub">基于 GitHub Search API 检索「A股 / 中国股市 / 股吧 / 雪球 / 淘股吧 / 舆情 / 情绪」等关键词，汇总去重后聚焦到「股票论坛舆情 / 情绪数据分析」相关仓库。
+    数据截至 <b>2026-08-17</b>，星标数为实时抓取；<b>活跃度</b>按仓库最近一次 push 时间（pushed_at）判定，近一年指 2025-08-17 之后仍有提交。</div>
+    <div class="meta">数据来源：GitHub REST API · 共 36 个仓库（舆情 20 个）· 近一年活跃 20 个（其中舆情 5 个）</div>
+  </div>
+</header>
+
+<div class="wrap">
+  <div class="stats">
+    <div class="stat"><div class="num">36</div><div class="lbl">中国股市仓库</div></div>
+    <div class="stat"><div class="num red">20</div><div class="lbl">舆情分析仓库</div></div>
+    <div class="stat"><div class="num green">20</div><div class="lbl">近一年活跃</div></div>
+    <div class="stat"><div class="num">16</div><div class="lbl">已停止更新</div></div>
+    <div class="stat"><div class="num red">8,830</div><div class="lbl">最高星仓库</div></div>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" data-tab="sentiment">🎯 舆情 / 情绪分析仓库 <span class="cnt">(20)</span></button>
+    <button class="tab" data-tab="all">📚 中国股市仓库全览 <span class="cnt">(36)</span></button>
+  </div>
+
+  <div class="controls">
+    <div class="search">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.5" y2="16.5"/></svg>
+      <input id="search" type="text" placeholder="搜索仓库名或说明…">
+    </div>
+    <select id="forumSel">
+      <option value="全部">全部论坛来源</option>
+      <option value="东方财富股吧">东方财富股吧</option>
+      <option value="雪球">雪球</option>
+      <option value="淘股吧">淘股吧</option>
+      <option value="新浪·多源">新浪·多源</option>
+      <option value="通用">通用 / 无特定论坛</option>
+    </select>
+    <select id="activeSel">
+      <option value="全部">全部活跃状态</option>
+      <option value="活跃" selected>✅ 近一年活跃</option>
+      <option value="停更">⏸ 已停止更新</option>
+    </select>
+  </div>
+  <div class="controls" id="catChips" style="margin-top:-6px;"></div>
+
+  <div class="charts">
+    <div class="chart-card">
+      <h3>📊 各分类 · 仓库数量分布</h3>
+      <div id="chartCount"></div>
+    </div>
+    <div class="chart-card">
+      <h3>⭐ 各分类 · Star 总量分布</h3>
+      <div id="chartStars"></div>
+    </div>
+  </div>
+
+  <div class="table-card">
+    <div class="table-head">
+      <div class="t" id="tableTitle">舆情 / 情绪分析仓库</div>
+      <div class="r" id="tableResult"></div>
+    </div>
+    <div class="tbl-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th data-key="stars" class="sorted">Stars <span class="arr">▼</span></th>
+            <th data-key="name">仓库</th>
+            <th data-key="lang">语言</th>
+            <th data-key="category">分类</th>
+            <th data-key="forum">论坛来源</th>
+            <th data-key="pushed_at">活跃状态</th>
+            <th>说明</th>
+          </tr>
+        </thead>
+        <tbody id="tbody"></tbody>
+      </table>
+    </div>
+    <div class="empty" id="empty" style="display:none;">没有匹配的仓库，试试调整搜索或筛选条件。</div>
+  </div>
+
+  <footer>
+    本报告由 WorkBuddy 基于 GitHub 官方 API 自动生成。星标数、push 时间为抓取时点快照，可能随时间变化。
+    仓库按功能分为：<b>论坛爬虫</b>（采集股吧/雪球文本）、<b>情感分析</b>（舆情+情绪/预测）、<b>词典资源</b>（情感词典/语料）、
+    <b>情绪指标</b>（情绪指数/热度产品），以及行情数据、量化交易、AI 投研等中国股市通用仓库。
+    活跃度判定：<b>pushed_at ≥ 2025-08-17</b> 记为「近一年活跃」；停更仓库在列表中降低透明度显示。
+  </footer>
+</div>
+
+<script>
+const PAYLOAD = {"data": [{"name": "simonlin1212/a-stock-data", "stars": 8830, "lang": "—", "forum": "通用", "category": "行情数据", "desc": "A股全栈数据工具包（15 数据源，覆盖舆情互动）", "sentiment": false, "url": "https://github.com/simonlin1212/a-stock-data", "stars_str": "8,830", "pushed_at": "2026-08-09", "archived": false, "active": true}, {"name": "ArvinLovegood/go-stock", "stars": 7275, "lang": "Go", "forum": "通用", "category": "AI投研", "desc": "AI 赋能股票分析（行情 + AI 热点资讯 + 资金/财务）", "sentiment": false, "url": "https://github.com/ArvinLovegood/go-stock", "stars_str": "7,275", "pushed_at": "2026-08-14", "archived": false, "active": true}, {"name": "sngyai/Sequoia-X", "stars": 5356, "lang": "Python", "forum": "通用", "category": "量化交易", "desc": "A股自动选股系统（技术形态扫描 + 飞书推送）", "sentiment": false, "url": "https://github.com/sngyai/Sequoia-X", "stars_str": "5,356", "pushed_at": "2026-07-10", "archived": false, "active": true}, {"name": "1nchaos/adata", "stars": 5100, "lang": "Python", "forum": "通用", "category": "行情数据", "desc": "免费开源 A股量化交易数据库", "sentiment": false, "url": "https://github.com/1nchaos/adata", "stars_str": "5,100", "pushed_at": "2025-12-26", "archived": false, "active": true}, {"name": "mpquant/Ashare", "stars": 3762, "lang": "Python", "forum": "通用", "category": "行情数据", "desc": "沪深股票行情实时数据接口", "sentiment": false, "url": "https://github.com/mpquant/Ashare", "stars_str": "3,762", "pushed_at": "2025-12-24", "archived": false, "active": true}, {"name": "simonlin1212/TradingAgents-astock", "stars": 2904, "lang": "Python", "forum": "通用", "category": "AI投研", "desc": "A股多 Agent 投研框架（龙虎榜/游资/解禁）", "sentiment": false, "url": "https://github.com/simonlin1212/TradingAgents-astock", "stars_str": "2,904", "pushed_at": "2026-08-09", "archived": false, "active": true}, {"name": "shy3130/tickflow-stock-panel", "stars": 2891, "lang": "Python", "forum": "通用", "category": "量化交易", "desc": "A股选股 + 监控 + 回测量化工作台", "sentiment": false, "url": "https://github.com/shy3130/tickflow-stock-panel", "stars_str": "2,891", "pushed_at": "2026-08-17", "archived": false, "active": true}, {"name": "decaywood/XueQiuSuperSpider", "stars": 2427, "lang": "Java", "forum": "雪球", "category": "论坛爬虫", "desc": "雪球股票信息超级爬虫", "sentiment": true, "url": "https://github.com/decaywood/XueQiuSuperSpider", "stars_str": "2,427", "pushed_at": "2024-03-27", "archived": false, "active": false}, {"name": "hello245m/free-stockdb", "stars": 2081, "lang": "HTML", "forum": "通用", "category": "行情数据", "desc": "A股日K/分钟K 本地量化引擎", "sentiment": false, "url": "https://github.com/hello245m/free-stockdb", "stars_str": "2,081", "pushed_at": "2026-08-11", "archived": false, "active": true}, {"name": "simonlin1212/Vibe-Research", "stars": 2076, "lang": "TypeScript", "forum": "通用", "category": "AI投研", "desc": "个人投研 Agent（每日复盘）", "sentiment": false, "url": "https://github.com/simonlin1212/Vibe-Research", "stars_str": "2,076", "pushed_at": "2026-08-09", "archived": false, "active": true}, {"name": "oficcejo/aiagents-stock", "stars": 1847, "lang": "Python", "forum": "通用", "category": "AI投研", "desc": "AI 智能体股票团队分析盯盘系统", "sentiment": false, "url": "https://github.com/oficcejo/aiagents-stock", "stars_str": "1,847", "pushed_at": "2026-07-27", "archived": false, "active": true}, {"name": "uname-yang/pysnowball", "stars": 1829, "lang": "Python", "forum": "雪球", "category": "论坛爬虫", "desc": "雪球股票数据接口 Python 封装", "sentiment": true, "url": "https://github.com/uname-yang/pysnowball", "stars_str": "1,829", "pushed_at": "2025-10-26", "archived": false, "active": true}, {"name": "zhangxiangliang/stock-api", "stars": 1826, "lang": "TypeScript", "forum": "通用", "category": "行情数据", "desc": "A股/美股/港股行情 API（Node/浏览器/CLI/MCP）", "sentiment": false, "url": "https://github.com/zhangxiangliang/stock-api", "stars_str": "1,826", "pushed_at": "2026-08-17", "archived": false, "active": true}, {"name": "run-bigpig/jcp", "stars": 1303, "lang": "Go", "forum": "通用", "category": "AI投研", "desc": "AI 驱动的智能 A股分析系统（多 Agent 协作）", "sentiment": false, "url": "https://github.com/run-bigpig/jcp", "stars_str": "1,303", "pushed_at": "2026-04-09", "archived": false, "active": true}, {"name": "DR-lin-eng/stock-scanner", "stars": 982, "lang": "Python", "forum": "通用", "category": "量化交易", "desc": "A股量化分析（配合 LLM 高级分析）", "sentiment": false, "url": "https://github.com/DR-lin-eng/stock-scanner", "stars_str": "982", "pushed_at": "2026-03-02", "archived": false, "active": true}, {"name": "kingschan1204/istock", "stars": 846, "lang": "Java", "forum": "通用", "category": "行情数据", "desc": "Java A股股票爬虫（Spring Boot）", "sentiment": false, "url": "https://github.com/kingschan1204/istock", "stars_str": "846", "pushed_at": "2024-12-27", "archived": false, "active": false}, {"name": "liuhuanyong/ChainKnowledgeGraph", "stars": 767, "lang": "Python", "forum": "通用", "category": "行情数据", "desc": "产业链知识图谱（A股上市公司/行业/产品）", "sentiment": false, "url": "https://github.com/liuhuanyong/ChainKnowledgeGraph", "stars_str": "767", "pushed_at": "2025-12-22", "archived": false, "active": true}, {"name": "garydai/stock", "stars": 713, "lang": "Python", "forum": "雪球", "category": "情绪指标", "desc": "雪球股票讨论度与价格走势的关系分析", "sentiment": true, "url": "https://github.com/garydai/stock", "stars_str": "713", "pushed_at": "2020-11-11", "archived": false, "active": false}, {"name": "Austin-Patrician/eastmoney", "stars": 635, "lang": "Python", "forum": "通用", "category": "情绪指标", "desc": "VibeAlpha Terminal，集成市场情绪分析", "sentiment": true, "url": "https://github.com/Austin-Patrician/eastmoney", "stars_str": "635", "pushed_at": "2026-02-24", "archived": false, "active": true}, {"name": "mihang123/mom-index", "stars": 346, "lang": "Python", "forum": "通用", "category": "情绪指标", "desc": "宝妈指数——追踪散户投资情绪的反向指标", "sentiment": true, "url": "https://github.com/mihang123/mom-index", "stars_str": "346", "pushed_at": "2026-07-25", "archived": false, "active": true}, {"name": "zcyeee/EastMoney_Crawler", "stars": 205, "lang": "Python", "forum": "东方财富股吧", "category": "论坛爬虫", "desc": "东方财富股吧爬虫（帖子及评论入库）", "sentiment": true, "url": "https://github.com/zcyeee/EastMoney_Crawler", "stars_str": "205", "pushed_at": "2026-02-24", "archived": false, "active": true}, {"name": "DavionWu2018/Sentiment_dictionary", "stars": 164, "lang": "Jupyter", "forum": "通用", "category": "词典资源", "desc": "中文金融情感词典（含股吧社媒非正式文本 + 上市公司正式文本）", "sentiment": true, "url": "https://github.com/DavionWu2018/Sentiment_dictionary", "stars_str": "164", "pushed_at": "2022-07-03", "archived": false, "active": false}, {"name": "rootSunc/CNEquity", "stars": 134, "lang": "Python", "forum": "通用", "category": "行情数据", "desc": "中国股票数据基础设施（覆盖舆情互动数据）", "sentiment": false, "url": "https://github.com/rootSunc/CNEquity", "stars_str": "134", "pushed_at": "2026-08-16", "archived": false, "active": true}, {"name": "Rockyzsu/StockPredict", "stars": 125, "lang": "Python", "forum": "东方财富股吧", "category": "情感分析", "desc": "东财股吧爬虫 + 自然语言分析，展示股市热度", "sentiment": true, "url": "https://github.com/Rockyzsu/StockPredict", "stars_str": "125", "pushed_at": "2019-09-24", "archived": false, "active": false}, {"name": "xiaobeibei26/xueiqiu_spider", "stars": 113, "lang": "Python", "forum": "雪球", "category": "论坛爬虫", "desc": "雪球沪深全站股票评论爬虫", "sentiment": true, "url": "https://github.com/xiaobeibei26/xueiqiu_spider", "stars_str": "113", "pushed_at": "2017-04-24", "archived": false, "active": false}, {"name": "Rockyzsu/xueqiu", "stars": 101, "lang": "Python", "forum": "雪球", "category": "论坛爬虫", "desc": "登录并爬取雪球全部文章", "sentiment": true, "url": "https://github.com/Rockyzsu/xueqiu", "stars_str": "101", "pushed_at": "2022-05-01", "archived": false, "active": false}, {"name": "Anton-Mu/finance_spider_data_analysis", "stars": 65, "lang": "Python", "forum": "新浪·多源", "category": "情感分析", "desc": "东财股吧/新浪财经爬虫 + 情感分析 + 自动生成舆情报告", "sentiment": true, "url": "https://github.com/Anton-Mu/finance_spider_data_analysis", "stars_str": "65", "pushed_at": "2023-03-22", "archived": false, "active": false}, {"name": "Euclid-Jie/Euclidguba-search", "stars": 63, "lang": "Python", "forum": "东方财富股吧", "category": "论坛爬虫", "desc": "爬取东方财富股吧发帖信息", "sentiment": true, "url": "https://github.com/Euclid-Jie/Euclidguba-search", "stars_str": "63", "pushed_at": "2025-02-17", "archived": false, "active": false}, {"name": "algosenses/EastMoneySpider", "stars": 60, "lang": "Python", "forum": "东方财富股吧", "category": "论坛爬虫", "desc": "东方财富网股吧爬虫", "sentiment": true, "url": "https://github.com/algosenses/EastMoneySpider", "stars_str": "60", "pushed_at": "2018-11-05", "archived": false, "active": false}, {"name": "irfanICMLL/EMM-for-stock-prediction", "stars": 60, "lang": "Python", "forum": "通用", "category": "情感分析", "desc": "股票论坛情感分析 + 股价预测模型", "sentiment": true, "url": "https://github.com/irfanICMLL/EMM-for-stock-prediction", "stars_str": "60", "pushed_at": "2017-06-04", "archived": false, "active": false}, {"name": "hogking/eastmoney_crawler", "stars": 52, "lang": "Python", "forum": "东方财富股吧", "category": "论坛爬虫", "desc": "爬取东财股吧沪深文章/评论/发言用户信息", "sentiment": true, "url": "https://github.com/hogking/eastmoney_crawler", "stars_str": "52", "pushed_at": "2018-06-05", "archived": false, "active": false}, {"name": "lemonhu/finance-qa-spider", "stars": 39, "lang": "Python", "forum": "新浪·多源", "category": "论坛爬虫", "desc": "金融问答文本采集（上交所/深交所/全景网/新浪股吧）", "sentiment": true, "url": "https://github.com/lemonhu/finance-qa-spider", "stars_str": "39", "pushed_at": "2017-08-20", "archived": false, "active": false}, {"name": "ICT-ZWJ/GHOST", "stars": 26, "lang": "Python", "forum": "通用", "category": "情感分析", "desc": "分层门控整合市场情绪的股价预测", "sentiment": true, "url": "https://github.com/ICT-ZWJ/GHOST", "stars_str": "26", "pushed_at": "2025-11-29", "archived": false, "active": true}, {"name": "KK-Kris/Stock-sentimnet-analysis", "stars": 22, "lang": "Python", "forum": "通用", "category": "情感分析", "desc": "中文股票评论情感分析方法", "sentiment": true, "url": "https://github.com/KK-Kris/Stock-sentimnet-analysis", "stars_str": "22", "pushed_at": "2022-12-11", "archived": false, "active": false}, {"name": "YuanjueDream/Taoguba_Data", "stars": 21, "lang": "Python", "forum": "淘股吧", "category": "情感分析", "desc": "淘股吧发帖爬取 + 论坛行为与涨跌延迟相关性研究", "sentiment": true, "url": "https://github.com/YuanjueDream/Taoguba_Data", "stars_str": "21", "pushed_at": "2019-04-25", "archived": false, "active": false}, {"name": "zyz282994112/StockBar", "stars": 15, "lang": "Java", "forum": "东方财富股吧", "category": "情感分析", "desc": "股吧情绪倾向量化 DEMO", "sentiment": true, "url": "https://github.com/zyz282994112/StockBar", "stars_str": "15", "pushed_at": "2015-04-11", "archived": false, "active": false}], "meta": {"total": 36, "total_stars": 55061, "sent_count": 20, "sent_stars": 7081, "top_name": "simonlin1212/a-stock-data", "top_stars": 8830, "cat_order": ["论坛爬虫", "情感分析", "词典资源", "情绪指标", "行情数据", "量化交易", "AI投研"], "cat_color": {"论坛爬虫": "#e67e22", "情感分析": "#c0392b", "词典资源": "#8e44ad", "情绪指标": "#16a085", "行情数据": "#2980b9", "量化交易": "#27ae60", "AI投研": "#d35400"}, "updated": "2026-08-17", "active_count": 20, "sent_active_count": 5, "inactive_count": 16}};
+const DATA = PAYLOAD.data;
+const CAT_COLOR = PAYLOAD.meta.cat_color;
+const CAT_ORDER = PAYLOAD.meta.cat_order;
+const forumClass = f => f==="东方财富股吧"?"":f==="雪球"?"xq":f==="淘股吧"?"tgb":(f==="通用"?"generic":"other");
+
+let state = { tab:"sentiment", search:"", category:"全部", forum:"全部", active:"活跃", sortKey:"stars", sortDir:-1 };
+const $ = s => document.querySelector(s);
+
+function filtered(){
+  let arr = DATA.filter(d => state.tab==="sentiment" ? d.sentiment : true);
+  if(state.search){
+    const q = state.search.toLowerCase();
+    arr = arr.filter(d => (d.name+" "+d.desc+" "+d.category).toLowerCase().includes(q));
+  }
+  if(state.category!=="全部") arr = arr.filter(d => d.category===state.category);
+  if(state.forum!=="全部") arr = arr.filter(d => d.forum===state.forum);
+  if(state.active!=="全部") arr = arr.filter(d => state.active==="活跃" ? d.active : !d.active);
+  return arr;
+}
+function sorted(arr){
+  const k = state.sortKey, dir = state.sortDir;
+  return [...arr].sort((a,b)=>{
+    let va=a[k], vb=b[k];
+    if(k==="stars") return (va-vb)*dir;
+    if(va==null) return 1; if(vb==null) return -1;
+    return String(va).localeCompare(String(vb))*dir;
+  });
+}
+function renderChips(){
+  const cats = state.tab==="sentiment" ? ["论坛爬虫","情感分析","词典资源","情绪指标"] : CAT_ORDER;
+  const el = $("#catChips");
+  let html = `<button class="chip ${state.category==="全部"?"active":""}" data-cat="全部">全部</button>`;
+  cats.forEach(c=>{ html += `<button class="chip ${state.category===c?"active":""}" data-cat="${c}">${c}</button>`; });
+  el.innerHTML = html;
+}
+function statusCell(d){
+  if(d.active){
+    return `<span class="status live"><span class="dot on"></span>活跃<span class="date">${d.pushed_at||""}</span>${d.archived?'<span class="badge-archived">归档</span>':''}</span>`;
+  }
+  return `<span class="status dead"><span class="dot off"></span>停更<span class="date">${d.pushed_at||"—"}</span></span>`;
+}
+function renderTable(){
+  const arr = sorted(filtered());
+  $("#tableResult").textContent = `共 ${arr.length} 个仓库`;
+  const tb = $("#tbody");
+  if(arr.length===0){ tb.innerHTML=""; $("#empty").style.display="block"; return; }
+  $("#empty").style.display="none";
+  tb.innerHTML = arr.map(d=>`
+    <tr class="${d.active?'':'inactive'}">
+      <td class="stars">${d.stars_str}</td>
+      <td class="name"><a href="${d.url}" target="_blank" rel="noopener">${d.name}</a></td>
+      <td><span class="lang">${d.lang}</span></td>
+      <td><span class="tag cat" style="background:${CAT_COLOR[d.category]}14;border-color:${CAT_COLOR[d.category]}44;color:${CAT_COLOR[d.category]};">${d.category}</span></td>
+      <td><span class="tag forum ${forumClass(d.forum)}">${d.forum}</span></td>
+      <td>${statusCell(d)}</td>
+      <td class="desc">${d.desc}</td>
+    </tr>`).join("");
+  updateHeaders();
+}
+function renderCharts(){
+  const arr = filtered();
+  const cats = state.tab==="sentiment" ? ["论坛爬虫","情感分析","词典资源","情绪指标"] : CAT_ORDER;
+  const present = cats.filter(c => arr.some(d=>d.category===c));
+  const countMap={}, starMap={};
+  present.forEach(c=>{ countMap[c]=0; starMap[c]=0; });
+  arr.forEach(d=>{ if(present.includes(d.category)){ countMap[d.category]++; starMap[d.category]+=d.stars; } });
+  const maxC = Math.max(1,...present.map(c=>countMap[c]));
+  const maxS = Math.max(1,...present.map(c=>starMap[c]));
+  const bar = (c,val,max,label)=>`
+    <div class="hbar">
+      <div class="row"><span>${c}</span><span class="val">${label}</span></div>
+      <div class="track"><div class="fill" style="width:${(val/max*100).toFixed(1)}%;background:${CAT_COLOR[c]};"></div></div>
+    </div>`;
+  $("#chartCount").innerHTML = present.map(c=>bar(c,countMap[c],maxC,countMap[c]+" 个")).join("");
+  $("#chartStars").innerHTML = present.map(c=>bar(c,starMap[c],maxS,starMap[c].toLocaleString())).join("");
+}
+function updateHeaders(){
+  document.querySelectorAll("thead th").forEach(th=>{
+    th.classList.toggle("sorted", th.dataset.key===state.sortKey);
+    const a = th.querySelector(".arr");
+    if(a) a.textContent = th.dataset.key===state.sortKey ? (state.sortDir===-1?"▼":"▲") : "";
+  });
+}
+function render(){
+  renderChips(); renderTable(); renderCharts();
+  $("#tableTitle").textContent = state.tab==="sentiment" ? "舆情 / 情绪分析仓库" : "中国股市仓库全览";
+}
+document.querySelectorAll(".tab").forEach(btn=>{
+  btn.addEventListener("click", ()=>{
+    document.querySelectorAll(".tab").forEach(b=>b.classList.remove("active"));
+    btn.classList.add("active");
+    state.tab = btn.dataset.tab; state.category = "全部"; render();
+  });
+});
+$("#search").addEventListener("input", e=>{ state.search=e.target.value.trim(); render(); });
+$("#forumSel").addEventListener("change", e=>{ state.forum=e.target.value; render(); });
+$("#activeSel").addEventListener("change", e=>{ state.active=e.target.value; render(); });
+$("#catChips").addEventListener("click", e=>{
+  const c = e.target.dataset.cat;
+  if(c!==undefined){ state.category = c; renderChips(); renderTable(); renderCharts(); }
+});
+document.querySelectorAll("thead th").forEach(th=>{
+  th.addEventListener("click", ()=>{
+    const k = th.dataset.key;
+    if(state.sortKey===k) state.sortDir *= -1; else { state.sortKey=k; state.sortDir=-1; }
+    renderTable();
+  });
+});
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,177 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.985 0.002 84);
+  --foreground: oklch(0.185 0.012 70);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.185 0.012 70);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.185 0.012 70);
+  --primary: oklch(0.21 0.015 70);
+  --primary-foreground: oklch(0.985 0 0);
+  --secondary: oklch(0.966 0.004 80);
+  --secondary-foreground: oklch(0.21 0.015 70);
+  --muted: oklch(0.966 0.004 80);
+  --muted-foreground: oklch(0.5 0.014 75);
+  --accent: oklch(0.952 0.006 80);
+  --accent-foreground: oklch(0.21 0.015 70);
+  --destructive: oklch(0.577 0.245 27.325);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(0.9 0.006 82);
+  --input: oklch(0.9 0.006 82);
+  --ring: oklch(0.55 0.02 74);
+  --chart-1: oklch(0.54 0.19 28);
+  --chart-2: oklch(0.49 0.105 159);
+  --chart-3: oklch(0.67 0.13 78);
+  --chart-4: oklch(0.48 0.09 237);
+  --chart-5: oklch(0.49 0.09 169);
+  --sidebar: oklch(0.21 0.015 70);
+  --sidebar-foreground: oklch(0.985 0.002 84);
+  --sidebar-primary: oklch(0.54 0.19 28);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.29 0.015 70);
+  --sidebar-accent-foreground: oklch(0.985 0.002 84);
+  --sidebar-border: oklch(0.29 0.015 70);
+  --sidebar-ring: oklch(0.54 0.19 28);
+  /* A 股语义色：红涨绿跌 */
+  --up: oklch(0.54 0.19 28);
+  --up-foreground: oklch(0.985 0 0);
+  --up-soft: oklch(0.945 0.028 28);
+  --down: oklch(0.49 0.105 159);
+  --down-foreground: oklch(0.985 0 0);
+  --down-soft: oklch(0.945 0.03 158);
+  --warning: oklch(0.62 0.13 78);
+  --warning-soft: oklch(0.955 0.045 83);
+}
+
+.dark {
+  --background: oklch(0.185 0.012 70);
+  --foreground: oklch(0.985 0.002 84);
+  --card: oklch(0.23 0.012 70);
+  --card-foreground: oklch(0.985 0.002 84);
+  --popover: oklch(0.23 0.012 70);
+  --popover-foreground: oklch(0.985 0.002 84);
+  --primary: oklch(0.985 0.002 84);
+  --primary-foreground: oklch(0.21 0.015 70);
+  --secondary: oklch(0.29 0.015 70);
+  --secondary-foreground: oklch(0.985 0.002 84);
+  --muted: oklch(0.29 0.015 70);
+  --muted-foreground: oklch(0.72 0.01 75);
+  --accent: oklch(0.29 0.015 70);
+  --accent-foreground: oklch(0.985 0.002 84);
+  --destructive: oklch(0.704 0.191 22.216);
+  --destructive-foreground: oklch(0.985 0 0);
+  --border: oklch(1 0 0 / 10%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.64 0.02 74);
+  --chart-1: oklch(0.66 0.16 28);
+  --chart-2: oklch(0.6 0.1 159);
+  --chart-3: oklch(0.72 0.12 78);
+  --chart-4: oklch(0.58 0.09 237);
+  --chart-5: oklch(0.6 0.09 169);
+  --sidebar: oklch(0.185 0.012 70);
+  --sidebar-foreground: oklch(0.985 0.002 84);
+  --sidebar-primary: oklch(0.66 0.16 28);
+  --sidebar-primary-foreground: oklch(0.985 0 0);
+  --sidebar-accent: oklch(0.27 0.014 70);
+  --sidebar-accent-foreground: oklch(0.985 0.002 84);
+  --sidebar-border: oklch(1 0 0 / 10%);
+  --sidebar-ring: oklch(0.66 0.16 28);
+  --up: oklch(0.66 0.16 28);
+  --up-soft: oklch(0.3 0.07 28);
+  --down: oklch(0.6 0.1 159);
+  --down-soft: oklch(0.28 0.05 159);
+  --warning: oklch(0.72 0.12 78);
+  --warning-soft: oklch(0.3 0.06 83);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-chart-1: var(--chart-1);
+  --color-chart-2: var(--chart-2);
+  --color-chart-3: var(--chart-3);
+  --color-chart-4: var(--chart-4);
+  --color-chart-5: var(--chart-5);
+  --color-sidebar: var(--sidebar);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-up: var(--up);
+  --color-up-foreground: var(--up-foreground);
+  --color-up-soft: var(--up-soft);
+  --color-down: var(--down);
+  --color-down-foreground: var(--down-foreground);
+  --color-down-soft: var(--down-soft);
+  --color-warning: var(--warning);
+  --color-warning-soft: var(--warning-soft);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --font-sans: -apple-system, BlinkMacSystemFont, "PingFang SC", "Hiragino Sans GB", "Segoe UI", "Microsoft YaHei", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  html {
+    scroll-behavior: smooth;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-feature-settings: "kern";
+    text-rendering: optimizeLegibility;
+  }
+  :focus-visible {
+    @apply outline-ring/70 outline-2 outline-offset-2;
+  }
+  ::selection {
+    @apply bg-up text-up-foreground;
+  }
+}
+
+@layer utilities {
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+  .text-up { color: var(--up); }
+  .text-down { color: var(--down); }
+  .text-warning { color: var(--warning); }
+  .text-neutral-value { color: var(--muted-foreground); }
+  .reveal {
+    animation: reveal 560ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    animation-delay: calc(var(--i, 0) * 70ms);
+  }
+  @keyframes reveal {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+}
