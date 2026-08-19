@@ -5,6 +5,7 @@ import type { ClueCategory, DashboardData, SentimentEvent } from "../domain/type
 import { api } from "../lib/api";
 import { changeLabel, formatDateTime, formatNumber } from "../lib/format";
 import { MoodFlowChart, ScoreDial, Sparkline, ToneBadge } from "../components/Visuals";
+import { LoadingState } from "@/components/LoadingState";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -54,14 +55,14 @@ export function RadarPage() {
   if (!data) return <RadarSkeleton />;
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-5">
       {error && <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning-soft px-4 py-2.5 text-sm text-foreground"><CircleAlert size={16} className="text-warning" /><span>自动更新暂时失败，当前仍显示上次成功数据：{error}</span></div>}
 
-      <header className="flex flex-wrap items-end justify-between gap-6 pt-2">
+      <header className="flex flex-wrap items-end justify-between gap-5">
         <div>
           <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">实时舆情 · {formatDateTime(data.asOf)} · 每分钟自动更新</p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight sm:text-4xl">让所有线索，汇成一张图。</h1>
-          <p className="mt-3 max-w-xl text-sm leading-relaxed text-muted-foreground">持续聚合所有已配置来源，把每条真实线索关联到全市场股票，再优先呈现自选股变化。</p>
+          <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">让所有线索，汇成一张图。</h1>
+          <p className="mt-2 max-w-xl text-sm leading-relaxed text-muted-foreground">持续聚合所有已配置来源，把每条真实线索关联到全市场股票，再优先呈现自选股变化。</p>
         </div>
         <div className="flex flex-wrap items-center gap-2.5">
           <Badge variant="outline" className={cn("gap-1.5 border-transparent", data.dataMode === "live" ? "bg-down-soft text-down" : "bg-warning-soft text-warning")}>
@@ -289,7 +290,8 @@ function EventDetail({ event }: { event: SentimentEvent }) {
 
 function RadarSkeleton() {
   return (
-    <div className="flex flex-col gap-6" role="status" aria-label="正在加载实时舆情">
+    <div className="flex flex-col gap-5" role="status" aria-label="正在加载实时舆情">
+      <div className="flex justify-center py-8"><LoadingState label="正在聚合全市场行情与舆情" /></div>
       <Skeleton className="h-28 w-full max-w-xl" />
       <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">{Array.from({ length: 4 }, (_, index) => <Skeleton className="h-28" key={index} />)}</div>
       <div className="grid gap-4 lg:grid-cols-2">{Array.from({ length: 2 }, (_, index) => <Skeleton className="h-72" key={index} />)}</div>

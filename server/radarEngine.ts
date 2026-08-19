@@ -1,14 +1,18 @@
 import { calculateAlertScore, calculateRadarScore, signalFromFactors } from "../src/domain/scoring.ts";
 import type {
+  DailySentimentSnapshot,
   DashboardData,
   MoodPoint,
+  MoverTag,
   ScoreFactors,
   SentimentEvent,
   StockSnapshot,
   ThemePulse,
 } from "../src/domain/types.ts";
-import { getClueCount, getStoredClues, saveClues } from "./database.ts";
+import { getClueCount, getStoredClues, saveClues, saveDailySentiment } from "./database.ts";
+import { diagLog } from "./diagLog.ts";
 import { getLiveClues, type RawClue } from "./eastMoney.ts";
+import type { EastMoneyMarketQuote } from "./eastMoneyMarket.ts";
 import { syncMarketQuotes, type MarketQuote } from "./marketSync.ts";
 import { classifyText } from "./sentiment.ts";
 import type { DiscussionSourceState } from "./userPosts.ts";
@@ -32,25 +36,131 @@ interface RadarSnapshot {
   tradeDate: string;
 }
 
+/** 异动候选口径：成交额前 150、涨幅前 100、跌幅前 50。 */
+export const MOVER_AMOUNT_TOP = 150;
+export const MOVER_GAIN_TOP = 100;
+export const MOVER_LOSS_TOP = 50;
+
+export interface MoverSelection {
+  turnoverHeavy: Set<string>;
+  gainers: Set<string>;
+  losers: Set<string>;
+  focusCodes: string[];
+}
+
+/** 按口径从行情列表筛选当日异动股（三者取并集）。 */
+export function selectMovers(items: MarketQuote[]): MoverSelection {
+  const byAmount = [...items]
+    .sort((a, b) => b.amount - a.amount)
+    .slice(0, MOVER_AMOUNT_TOP)
+    .map((quote) => quote.code);
+  const turnoverHeavy = new Set(byAmount);
+  const gainers = new Set(
+    [...items]
+      .filter((quote) => quote.pctChange > 0)
+      .sort((a, b) => b.pctChange - a.pctChange)
+      .slice(0, MOVER_GAIN_TOP)
+      .map((quote) => quote.code),
+  );
+  const losers = new Set(
+    [...items]
+      .filter((quote) => quote.pctChange < 0)
+      .sort((a, b) => a.pctChange - b.pctChange)
+      .slice(0, MOVER_LOSS_TOP)
+      .map((quote) => quote.code),
+  );
+  const focusCodes = [...new Set([...gainers, ...losers, ...byAmount])];
+  return { turnoverHeavy, gainers, losers, focusCodes };
+}
+
+/** 从快照股票中提取可沉淀的当日舆情字段（仅对已评分股票）。 */
+function toDailySentiment(stock: StockSnapshot): DailySentimentSnapshot | null {
+  if (stock.analysisStatus !== "scored") return null;
+  return {
+    radarScore: stock.radarScore,
+    alertScore: stock.alertScore,
+    signal: stock.signal,
+    analysisStatus: stock.analysisStatus,
+    factors: stock.factors,
+    mentionCount: stock.mentionCount,
+    mentionDelta: stock.mentionDelta,
+    topics: stock.topics,
+    summary: stock.summary,
+    sparkline: stock.sparkline,
+    sentimentTrend: stock.sentimentTrend,
+    sourceMix: stock.sourceMix,
+  };
+}
+
+/** 由历史每日行情构建某个交易日的股票快照；传入 sentimentByCode 时回填当日舆情（历史舆情快照）。 */
+export function buildHistoricalStocks(
+  quotes: EastMoneyMarketQuote[],
+  watchlist: string[],
+  tradeDate: string,
+  sentimentByCode?: Map<string, DailySentimentSnapshot>,
+): StockSnapshot[] {
+  const normalized: MarketQuote[] = quotes
+    .filter((quote) => quote.price !== null)
+    .map((quote) => ({
+      ...quote,
+      price: quote.price!,
+      pctChange: quote.pctChange ?? 0,
+      volume: quote.volume ?? 0,
+      amount: quote.amount ?? 0,
+      turnover: quote.turnover ?? 0,
+      marketCap: quote.marketCap ?? 0,
+    }));
+  const { turnoverHeavy, gainers, losers } = selectMovers(normalized);
+  const selected = new Set(watchlist);
+  const asOf = normalized[0]?.quoteAt ?? `${tradeDate}T15:00:00+08:00`;
+  return normalized.map((quote) => {
+    const tags: MoverTag[] = [];
+    if (gainers.has(quote.code)) tags.push("涨幅大");
+    if (losers.has(quote.code)) tags.push("跌幅大");
+    if (turnoverHeavy.has(quote.code)) tags.push("成交额大");
+    const base = aggregateStock(quote, [], selected.has(quote.code), asOf, tags);
+    const sentiment = sentimentByCode?.get(quote.code);
+    return sentiment ? { ...base, ...sentiment } : base;
+  });
+}
+
 let snapshotCache: { value: RadarSnapshot; expiresAt: number } | null = null;
+/** 单飞锁：同一时刻只允许一个快照构建，其余请求等待同一结果，避免冷启动并发风暴。 */
+let activeBuild: Promise<RadarSnapshot> | null = null;
 
-export async function buildRadarSnapshot(watchlist: string[], force = false): Promise<RadarSnapshot> {
+export function buildRadarSnapshot(watchlist: string[], force = false): Promise<RadarSnapshot> {
   if (!force && snapshotCache && snapshotCache.expiresAt > Date.now()) {
-    return withWatchlist(snapshotCache.value, watchlist);
+    return Promise.resolve(withWatchlist(snapshotCache.value, watchlist));
   }
+  if (activeBuild && !force) {
+    // 已有构建进行中：共享同一结果（自选股按请求单独套用）。
+    return activeBuild.then((value) => withWatchlist(value, watchlist));
+  }
+  activeBuild = buildSnapshotInner(watchlist, force).finally(() => {
+    activeBuild = null;
+  });
+  return activeBuild;
+}
 
+async function buildSnapshotInner(watchlist: string[], force: boolean): Promise<RadarSnapshot> {
+  diagLog("radar", "build 开始");
   const market = await syncMarketQuotes(force);
-  // 讨论覆盖主体：当日涨跌幅与成交额前列的异动股票 + 自选股（约 600 只，覆盖全市场讨论量主体），
-  // 另有股吧全市场热帖精选补充长尾。讨论层内部按可配置周期缓存（默认五分钟），行情层仍然实时，
-  // 因此全市场热度排序每轮讨论刷新后更新。
-  const byMove = [...market.items].sort((a, b) => Math.abs(b.pctChange) - Math.abs(a.pctChange)).slice(0, 300).map((quote) => quote.code);
-  const byAmount = [...market.items].sort((a, b) => b.amount - a.amount).slice(0, 300).map((quote) => quote.code);
-  const focusCodes = [...new Set([...watchlist, ...byMove, ...byAmount])];
-  const liveClues = await getLiveClues(force, focusCodes).catch((error) => {
+  diagLog("radar", "市场就绪", market.items.length, "只", market.stale ? "stale" : "fresh");
+  // 异动股集合（异动候选页范围），严格按口径筛选：
+  //   - 成交额前 150（amount 降序）—— 承接全市场流动性主体；
+  //   - 涨幅前 100（pctChange>0 降序）—— 当日最强多头；
+  //   - 跌幅前 50（pctChange<0 升序，跌幅最大在前）—— 当日最强空头。
+  // 三者取并集，确保入选标的确实是“成交活跃 / 涨跌幅显著”的股票，避免小涨小跌、低成交个股混入。
+  // 讨论层只对这一集合扫股吧，控制抓取量；讨论层按可配置周期缓存，行情层仍实时。
+  const { turnoverHeavy, gainers, losers, focusCodes } = selectMovers(market.items);
+  // 股票名称映射：微博等按名称搜索的讨论源使用。
+  const stockNames = new Map(market.items.map((quote) => [quote.code, quote.name]));
+  const liveClues = await getLiveClues(force, focusCodes, stockNames).catch((error) => {
       const stored = getStoredClues();
       if (!stored.length) throw error;
       return { items: stored, updatedAt: stored[0]?.publishedAt ?? new Date().toISOString(), cached: true, failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: [] };
     });
+  diagLog("radar", "线索就绪", liveClues.items.length, "条", liveClues.cached ? "(缓存)" : "");
   saveClues(liveClues.items);
   const quoteMap = new Map(market.items.map((quote) => [quote.code, quote]));
   const events = linkAndAnalyzeClues(liveClues.items, market.items, quoteMap);
@@ -62,7 +172,19 @@ export async function buildRadarSnapshot(watchlist: string[], force = false): Pr
       eventMap.set(related.code, current);
     }
   }
-  const stocks = market.items.map((quote) => aggregateStock(quote, eventMap.get(quote.code) ?? [], false, market.updatedAt));
+  const stocks = market.items.map((quote) => {
+    const tags: Array<"涨幅大" | "跌幅大" | "成交额大"> = [];
+    if (gainers.has(quote.code)) tags.push("涨幅大");
+    if (losers.has(quote.code)) tags.push("跌幅大");
+    if (turnoverHeavy.has(quote.code)) tags.push("成交额大");
+    return aggregateStock(quote, eventMap.get(quote.code) ?? [], false, market.updatedAt, tags);
+  });
+  // 每日舆情快照：把当日已评分股票的线索聚合结果沉淀到 SQLite，供历史交易日回看。
+  saveDailySentiment(
+    stocks
+      .map((stock) => ({ code: stock.code, tradeDate: market.tradeDate, sentiment: toDailySentiment(stock) }))
+      .filter((row): row is { code: string; tradeDate: string; sentiment: DailySentimentSnapshot } => row.sentiment !== null),
+  );
   const value: RadarSnapshot = {
     quotes: market.items,
     stocks,
@@ -128,11 +250,20 @@ function withWatchlist(snapshot: RadarSnapshot, watchlist: string[]): RadarSnaps
   return { ...snapshot, stocks: snapshot.stocks.map((stock) => ({ ...stock, isWatchlisted: selected.has(stock.code) })) };
 }
 
+/** 情绪分类输入：股吧评论只取评论正文，其余来源取标题 + 摘要。 */
+function classificationText(clue: RawClue): string {
+  if (clue.sourceKind !== "forum") return `${clue.title} ${clue.summary}`;
+  const reply = clue.summary.match(/^在《[^》]*》下的评论：([\s\S]*)$/);
+  return reply ? reply[1] : `${clue.title} ${clue.summary}`;
+}
+
 function linkAndAnalyzeClues(clues: RawClue[], quotes: MarketQuote[], quoteMap: Map<string, MarketQuote>): SentimentEvent[] {
   const searchableQuotes = quotes.filter((quote) => quote.name.length >= 2);
   return clues.map((clue): SentimentEvent | null => {
     const text = `${clue.title} ${clue.summary}`;
-    const analysis = classifyText(text);
+    // 股吧评论的 summary 形如「在《帖子标题》下的评论：评论文本」。
+    // 情绪应只反映评论本身，剥离帖子标题，避免帖子标题的情绪污染评论情绪。
+    const analysis = classifyText(classificationText(clue));
     const directCodes = new Set(clue.stockCodes.filter((code) => quoteMap.has(code)));
     if (directCodes.size === 0) {
       for (const quote of searchableQuotes) {
@@ -175,7 +306,7 @@ function linkAndAnalyzeClues(clues: RawClue[], quotes: MarketQuote[], quoteMap: 
     .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
 }
 
-function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlisted: boolean, asOf: string): StockSnapshot {
+function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlisted: boolean, asOf: string, moverTags: Array<"涨幅大" | "跌幅大" | "成交额大"> = []): StockSnapshot {
   if (!events.length) {
     const emptyFactors: ScoreFactors = { sentiment: 0, attention: 0, velocity: 0, consensus: 0, sourceQuality: 0, priceConfirm: 50, freshness: 0 };
     return {
@@ -195,6 +326,7 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
       sourceMix: {},
       asOf,
       isWatchlisted,
+      moverTags,
     };
   }
 
@@ -246,6 +378,7 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
     sourceMix,
     asOf,
     isWatchlisted,
+    moverTags,
   };
 }
 

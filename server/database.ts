@@ -2,6 +2,7 @@ import { mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
+import type { DailySentimentSnapshot } from "../src/domain/types.ts";
 import type { RawClue } from "./eastMoney.ts";
 import type {
   EastMoneyAdjustment,
@@ -185,6 +186,50 @@ if (schemaVersion < 3) {
   `);
 }
 
+/**
+ * v4：新增「本机同步推送」的雪球讨论存储表。
+ * 远程无头服务器无法稳定直连雪球（WAF / 机房 IP / 无 GUI），因此由本机受信任的
+ * 浏览器抓取后通过 /api/xueqiu/push 推送到服务器，服务器只接收、存储、展示。
+ */
+if (schemaVersion < 4) {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS xueqiu_discussions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL,
+      published_at TEXT NOT NULL,
+      url TEXT,
+      stock_codes_json TEXT NOT NULL,
+      interaction_count INTEGER NOT NULL DEFAULT 0,
+      pushed_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS xueqiu_discussions_published
+      ON xueqiu_discussions(published_at DESC);
+    PRAGMA user_version = 4;
+  `);
+}
+
+/**
+ * v5：新增「每日舆情快照」表。按“股票代码 + 交易日”沉淀当日线索聚合结果
+ * （异动分、方向分、情绪因子、主题、摘要等），供异动候选页回看历史交易日的舆情。
+ */
+if (schemaVersion < 5) {
+  database.exec(`
+    BEGIN IMMEDIATE;
+    CREATE TABLE IF NOT EXISTS stock_daily_sentiment (
+      code TEXT NOT NULL,
+      trade_date TEXT NOT NULL,
+      sentiment_json TEXT NOT NULL,
+      saved_at TEXT NOT NULL,
+      PRIMARY KEY(code, trade_date)
+    );
+    CREATE INDEX IF NOT EXISTS stock_sentiment_trade_date
+      ON stock_daily_sentiment(trade_date, code);
+    PRAGMA user_version = 5;
+    COMMIT;
+  `);
+}
+
 const DEFAULT_WATCHLIST = ["300308", "688256", "601138", "600519", "002594"];
 const watchlistSeeded = database.prepare("SELECT value FROM app_meta WHERE key = 'watchlist_seeded'").get();
 if (!watchlistSeeded) {
@@ -258,6 +303,55 @@ export function getStoredClues(limit = 1_000): RawClue[] {
 
 export function getClueCount(): number {
   return Number((database.prepare("SELECT COUNT(*) AS count FROM clues").get() as { count: number }).count);
+}
+
+/** 写入本机同步推送过来的雪球讨论（upsert），并清理 7 天前的旧数据。 */
+export function savePushedXueqiuDiscussions(clues: RawClue[]): number {
+  if (!clues.length) return 0;
+  const statement = database.prepare(`
+    INSERT INTO xueqiu_discussions(id, title, summary, published_at, url, stock_codes_json, interaction_count, pushed_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      title=excluded.title,
+      summary=excluded.summary,
+      published_at=excluded.published_at,
+      url=excluded.url,
+      stock_codes_json=excluded.stock_codes_json,
+      interaction_count=excluded.interaction_count,
+      pushed_at=excluded.pushed_at
+  `);
+  const pushedAt = new Date().toISOString();
+  database.exec("BEGIN");
+  try {
+    for (const clue of clues) {
+      statement.run(clue.id, clue.title, clue.summary, clue.publishedAt, clue.url, JSON.stringify(clue.stockCodes), clue.interactionCount, pushedAt);
+    }
+    database.prepare("DELETE FROM xueqiu_discussions WHERE published_at < ?").run(new Date(Date.now() - 7 * 86_400_000).toISOString());
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+  return clues.length;
+}
+
+/** 读取最近 withinHours 小时内、由本机同步推送的雪球讨论（按发布时间倒序）。 */
+export function getPushedXueqiuDiscussions(withinHours = 72): RawClue[] {
+  const cutoff = new Date(Date.now() - withinHours * 3_600_000).toISOString();
+  return (database.prepare(`
+    SELECT id, title, summary, published_at, url, stock_codes_json, interaction_count
+    FROM xueqiu_discussions WHERE published_at >= ? ORDER BY published_at DESC LIMIT 1000
+  `).all(cutoff) as Array<Record<string, string | number>>).map((row) => ({
+    id: String(row.id),
+    source: "雪球讨论",
+    sourceKind: "forum",
+    title: String(row.title),
+    summary: String(row.summary),
+    publishedAt: String(row.published_at),
+    url: String(row.url || ""),
+    stockCodes: JSON.parse(String(row.stock_codes_json)) as string[],
+    interactionCount: Number(row.interaction_count),
+  }));
 }
 
 export interface MarketSnapshotInfo {
@@ -529,6 +623,85 @@ export function getLatestCompleteMarketQuotes(): EastMoneyMarketQuote[] {
     ORDER BY fetched_at DESC LIMIT 1
   `).get() as { id: string } | undefined;
   return snapshot ? getMarketQuotesBySnapshot(snapshot.id) : [];
+}
+
+/** 批量读取一批股票最近若干交易日的成交额（升序，用于 5 天成交额柱状图）。可传 endDate 限定不晚于某交易日（历史异动视图）。 */
+export function getRecentAmounts(codes: string[], days = 5, endDate?: string): Map<string, Array<{ tradeDate: string; amount: number }>> {
+  const result = new Map<string, Array<{ tradeDate: string; amount: number }>>();
+  if (!codes.length) return result;
+  const placeholders = codes.map(() => "?").join(",");
+  const endClause = endDate ? " AND trade_date <= ?" : "";
+  const rows = database.prepare(`
+    SELECT code, trade_date, amount FROM market_daily_quotes
+    WHERE code IN (${placeholders})${endClause}
+    ORDER BY code, trade_date DESC
+  `).all(...(endDate ? [...codes, endDate] : codes)) as Array<{ code: string; trade_date: string; amount: number | null }>;
+  for (const row of rows) {
+    if (row.amount === null || !Number.isFinite(row.amount)) continue;
+    const list = result.get(row.code) ?? [];
+    if (list.length < days) list.push({ tradeDate: String(row.trade_date), amount: row.amount });
+    result.set(row.code, list);
+  }
+  for (const list of result.values()) list.reverse();
+  return result;
+}
+
+/** 列出所有已完整保存的交易日（降序，YYYY-MM-DD）。 */
+export function listTradeDates(): string[] {
+  return (database.prepare(`
+    SELECT DISTINCT trade_date FROM market_daily_quotes ORDER BY trade_date DESC
+  `).all() as Array<{ trade_date: string }>).map((row) => String(row.trade_date));
+}
+
+/** 读取某个交易日全市场的每日行情快照（用于历史每日异动）。 */
+export function getMarketQuotesByTradeDate(tradeDate: string): EastMoneyMarketQuote[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)) throw new Error("交易日必须是 YYYY-MM-DD");
+  return (database.prepare(`
+    SELECT q.* FROM market_daily_quotes q
+    WHERE q.trade_date = ?
+    ORDER BY q.code
+  `).all(tradeDate) as Array<Record<string, unknown>>).map(marketQuoteFromRow);
+}
+
+/** 原子写入某个交易日的每日舆情快照（upsert，同股票同日只保留最新一次聚合结果）。 */
+export function saveDailySentiment(rows: Array<{ code: string; tradeDate: string; sentiment: DailySentimentSnapshot }>): number {
+  if (!rows.length) return 0;
+  const statement = database.prepare(`
+    INSERT INTO stock_daily_sentiment(code, trade_date, sentiment_json, saved_at)
+    VALUES (?, ?, ?, ?)
+    ON CONFLICT(code, trade_date) DO UPDATE SET
+      sentiment_json = excluded.sentiment_json,
+      saved_at = excluded.saved_at
+  `);
+  const savedAt = new Date().toISOString();
+  database.exec("BEGIN");
+  try {
+    for (const row of rows) {
+      statement.run(row.code, row.tradeDate, JSON.stringify(row.sentiment), savedAt);
+    }
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+  return rows.length;
+}
+
+/** 读取某个交易日的每日舆情快照，按股票代码返回。 */
+export function getDailySentiment(tradeDate: string): Map<string, DailySentimentSnapshot> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)) throw new Error("交易日必须是 YYYY-MM-DD");
+  const rows = database.prepare(`
+    SELECT code, sentiment_json FROM stock_daily_sentiment WHERE trade_date = ?
+  `).all(tradeDate) as Array<{ code: string; sentiment_json: string }>;
+  const result = new Map<string, DailySentimentSnapshot>();
+  for (const row of rows) {
+    try {
+      result.set(String(row.code), JSON.parse(String(row.sentiment_json)) as DailySentimentSnapshot);
+    } catch {
+      // 单条损坏不影响整体读取。
+    }
+  }
+  return result;
 }
 
 export function getLatestMarketQuote(code: string): EastMoneyMarketQuote | null {

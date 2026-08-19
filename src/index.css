@@ -174,4 +174,23 @@
     from { opacity: 0; transform: translateY(10px); }
     to { opacity: 1; transform: translateY(0); }
   }
+  @keyframes pixel-on {
+    0%, 100% { opacity: 0.07; transform: scale(0.82); }
+    50% { opacity: 1; transform: scale(1); }
+  }
+  @keyframes loading-shimmer {
+    to { background-position: -200% 0; }
+  }
+  .loading-shimmer {
+    background-image: linear-gradient(90deg, var(--muted-foreground) 35%, var(--foreground) 50%, var(--muted-foreground) 65%);
+    background-size: 200% 100%;
+    background-clip: text;
+    -webkit-background-clip: text;
+    color: transparent;
+    animation: loading-shimmer 1.4s linear infinite;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    [style*="pixel-on"] { animation: none !important; }
+    .loading-shimmer { animation: none; }
+  }
 }

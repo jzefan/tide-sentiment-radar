@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, ArrowUpRight, CheckCircle2, CircleAlert, Database, Info, Layers3, Star } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
 import { FactorBars, KlineChart, PriceSentimentChart, ToneBadge } from "../components/Visuals";
+import { LoadingState } from "@/components/LoadingState";
 import type { ClueCategory, KlinePeriod, KlineResponse, SentimentEvent, StockDetailResponse } from "../domain/types";
 import { ApiError, api } from "../lib/api";
 import { changeLabel, formatDateTime } from "../lib/format";
@@ -83,7 +84,13 @@ export function StockPage() {
       </div>
     </div>
   );
-  if (!data) return <div className="flex flex-col gap-6" role="status" aria-label="正在加载个股详情"><Skeleton className="h-40" /><Skeleton className="h-96" /></div>;
+  if (!data) return (
+    <div className="flex flex-col gap-5" role="status" aria-label="正在加载个股详情">
+      <div className="flex justify-center py-8"><LoadingState label="正在加载个股详情与K线" /></div>
+      <Skeleton className="h-40" />
+      <Skeleton className="h-96" />
+    </div>
+  );
 
   const { stock, events, marketSource } = data;
   const selected = watchlist.has(stock.code) || Boolean(stock.isWatchlisted);
@@ -98,11 +105,11 @@ export function StockPage() {
   };
 
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-5">
       {error && <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning-soft px-4 py-2.5 text-sm"><CircleAlert size={16} className="text-warning" /><span>自动更新暂时失败，当前仍显示上次成功数据：{error}</span></div>}
       <Link to="/screener" className="inline-flex w-fit items-center gap-1.5 text-sm text-muted-foreground transition-colors hover:text-foreground"><ArrowLeft size={15} />全市场股票池</Link>
 
-      <header className="grid gap-6 border-b pb-7 lg:grid-cols-[1fr_1.1fr_auto] lg:items-end">
+      <header className="grid gap-5 border-b pb-5 lg:grid-cols-[1fr_1.1fr_auto] lg:items-end">
         <div>
           <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">{stock.market} · {stock.code} · 每分钟自动更新</p>
           <div className="mt-1 flex items-center gap-4">
@@ -195,9 +202,11 @@ export function StockPage() {
             </div>
           ) : (
             <>
-              <KlineChart points={klineData.items} variant={klinePeriod === "minute" ? "line" : "candle"} />
+              <KlineChart points={klineData.items} variant={klinePeriod === "minute" ? "line" : "candle"} previousClose={klineData.previousClose} />
               <p className="mt-3 text-right text-[11px] text-muted-foreground">
-                数据来源：{klineData.source === "eastmoney" ? (klinePeriod === "minute" ? "东方财富实时分时" : "东方财富历史行情") : klineData.source === "tencent-mirror" ? "腾讯行情镜像（东方财富历史主机不可达）" : "本地数据库"} · 每 {klinePeriod === "minute" ? "15" : "60"} 秒自动更新
+                数据来源：{klineData.source === "eastmoney" ? (klinePeriod === "minute" ? "东方财富实时分时" : "东方财富历史行情") : klineData.source === "tencent-mirror" ? "腾讯行情镜像（东方财富历史主机不可达）" : "本地数据库"}
+                {klinePeriod === "minute" && klineData.items.length > 0 ? ` · 分时截至 ${klineData.items.at(-1)!.time}（午休或收盘后自然静止）` : ""}
+                {" "}· 每 {klinePeriod === "minute" ? "15" : "60"} 秒自动更新
               </p>
             </>
           )}

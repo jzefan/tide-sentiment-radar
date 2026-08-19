@@ -46,9 +46,19 @@ export interface StockQuery {
   signal?: string;
   market?: string;
   sort?: string;
-  watchlist?: "all" | "only";
+  /** all 全市场 | movers 异动候选（仅异动股：成交额前150 + 涨幅前100 + 跌幅前50） | watchlist 自选股 */
+  scope?: "all" | "movers" | "watchlist";
+  /** 交易日（YYYY-MM-DD）；留空使用最新交易日。历史日期展示每日异动行情，无舆情分。 */
+  date?: string;
+  /** 异动标签多选筛选：涨幅大 / 跌幅大 / 成交额大（OR 匹配）。 */
+  tags?: string[];
   page?: number;
   pageSize?: number;
+}
+
+export interface TradeDatesResponse {
+  dates: string[];
+  latest: string | null;
 }
 
 export const api = {
@@ -59,7 +69,9 @@ export const api = {
     if (query.signal && query.signal !== "all") params.set("signal", query.signal);
     if (query.market && query.market !== "all") params.set("market", query.market);
     if (query.sort) params.set("sort", query.sort);
-    if (query.watchlist === "only") params.set("watchlist", "only");
+    if (query.scope && query.scope !== "all") params.set("scope", query.scope);
+    if (query.date) params.set("date", query.date);
+    if (query.tags?.length) params.set("tags", query.tags.join(","));
     params.set("page", String(query.page ?? 1));
     params.set("page_size", String(query.pageSize ?? 50));
     return request<StockListResponse>(`/api/stocks?${params}`, { signal });
@@ -67,6 +79,7 @@ export const api = {
   stock: (code: string, signal?: AbortSignal) => request<StockDetailResponse>(`/api/stocks/${encodeURIComponent(code)}`, { signal }),
   kline: (code: string, period: KlinePeriod, signal?: AbortSignal) => request<KlineResponse>(`/api/stocks/${encodeURIComponent(code)}/kline?period=${period}`, { signal }),
   events: () => request<EventsResponse>("/api/events"),
+  tradeDates: (signal?: AbortSignal) => request<TradeDatesResponse>("/api/trade-dates", { signal }),
   system: (signal?: AbortSignal) => request<SystemStatus>("/api/system", { signal }),
   refreshSystem: (signal?: AbortSignal) => request<SystemStatus>("/api/system/refresh", { method: "POST", signal }),
   watchlist: () => request<WatchlistResponse>("/api/watchlist"),

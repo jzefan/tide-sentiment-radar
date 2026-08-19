@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { ChevronRight, CircleAlert, Search, Star } from "lucide-react";
+import { ChevronRight, CircleAlert, Loader2, Search, Star } from "lucide-react";
 import { Link } from "react-router-dom";
 import type { StockSnapshot } from "../domain/types";
 import { api } from "../lib/api";
@@ -9,6 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
+import { LoadingState } from "@/components/LoadingState";
 import { cn } from "@/lib/utils";
 
 export function WatchlistPage() {
@@ -29,7 +30,7 @@ export function WatchlistPage() {
       controller?.abort();
       const activeController = new AbortController();
       controller = activeController;
-      api.stocks({ q: query, watchlist: query ? "all" : "only", sort: "alert", page, pageSize: 50 }, activeController.signal)
+      api.stocks({ q: query, scope: query ? "all" : "watchlist", sort: "alert", page, pageSize: 50 }, activeController.signal)
         .then((result) => { setItems(result.items); setTotal(result.total); setError(""); })
         .catch((cause) => {
           if (cause instanceof DOMException && cause.name === "AbortError") return;
@@ -54,23 +55,35 @@ export function WatchlistPage() {
   };
 
   return (
-    <div className="flex flex-col gap-5">
-      <header className="flex items-center justify-between gap-6 border-b pb-4">
-        <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">我的自选股 · 每分钟自动更新</p>
+    <div className="flex flex-col gap-4">
+      <header className="flex items-center justify-between gap-6 border-b pb-3">
+        <p className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs uppercase tracking-[0.16em] text-muted-foreground">
+          我的自选股 · 每分钟自动更新
+          {loading && items.length > 0 && (
+            <span className="inline-flex items-center gap-1.5 normal-case tracking-normal">
+              <Loader2 size={13} className="animate-spin" aria-hidden="true" />
+              读取中…
+            </span>
+          )}
+        </p>
         <div className="flex items-baseline gap-2"><strong className="text-2xl font-semibold tabular">{watchlist.codes.length}</strong><span className="text-xs text-muted-foreground">只自选股</span></div>
       </header>
 
       <div className="flex flex-wrap items-end justify-between gap-4 border-b pb-5">
         <div className="relative w-full max-w-xl">
           <Search size={15} className="absolute bottom-3 left-3 text-muted-foreground" aria-hidden="true" />
-          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入股票名称或六位代码" className="h-10 pl-9 text-sm" />
+          <Input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="输入名称、六位代码或拼音首字母（如 ZGPA）" className="h-10 pl-9 text-sm" />
         </div>
         <p className="text-xs text-muted-foreground">{query ? `找到 ${total} 只匹配股票` : "默认显示全部自选股及其最新舆情状态"}</p>
       </div>
 
       {error && <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning-soft px-4 py-2.5 text-sm"><CircleAlert size={16} className="text-warning" />{error}</div>}
-      {loading ? (
-        <Skeleton className="h-96 w-full" role="status" aria-label="正在加载自选股" />
+      {/* 重新加载时保留旧列表不闪屏：骨架屏只在还没有任何数据时显示 */}
+      {loading && items.length === 0 ? (
+        <div className="flex flex-col items-center gap-5 py-16" role="status" aria-label="正在加载自选股">
+          <LoadingState label="正在读取自选股舆情" />
+          <Skeleton className="h-72 w-full" />
+        </div>
       ) : items.length ? (
         <Card className="overflow-hidden py-0">
           <CardContent className="px-0">

@@ -7,5 +7,11 @@ coverage/
 data/*.sqlite
 data/*.sqlite-shm
 data/*.sqlite-wal
+data/xueqiu-cookie.txt
 .pnpm-store/
 *.tsbuildinfo
+data/xueqiu-chrome-profile/
+data/xueqiu-chrome-profile.lock
+data/weibo-chrome-profile/
+data/weibo-chrome-profile.lock
+.workbuddy/

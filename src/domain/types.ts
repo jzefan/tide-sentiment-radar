@@ -38,7 +38,26 @@ export interface KlineResponse {
   period: KlinePeriod;
   source: "eastmoney" | "tencent-mirror" | "cache";
   state: "fresh" | "stale" | "unavailable";
+  previousClose?: number | null;
   items: KlinePoint[];
+}
+
+export type MoverTag = "涨幅大" | "跌幅大" | "成交额大";
+
+/** 每日舆情快照：某交易日某只股票的线索聚合结果（用于历史异动回看，不含行情字段）。 */
+export interface DailySentimentSnapshot {
+  radarScore: number | null;
+  alertScore: number | null;
+  signal: SignalLabel;
+  analysisStatus: AnalysisStatus;
+  factors: ScoreFactors;
+  mentionCount: number;
+  mentionDelta: number;
+  topics: string[];
+  summary: string;
+  sparkline: number[];
+  sentimentTrend: number[];
+  sourceMix: Record<string, number>;
 }
 
 export interface StockSnapshot {
@@ -48,6 +67,10 @@ export interface StockSnapshot {
   quoteUrl?: string;
   price: number;
   pctChange: number;
+  /** 当日成交额（元）。 */
+  amount: number;
+  /** 最近若干交易日的成交额（升序，含当日），用于成交额变化柱状图。 */
+  amountHistory?: Array<{ date: string; amount: number }>;
   radarScore: number | null;
   alertScore: number | null;
   signal: SignalLabel;
@@ -63,6 +86,8 @@ export interface StockSnapshot {
   sourceMix: Record<string, number>;
   asOf: string;
   isWatchlisted?: boolean;
+  /** 异动标签：涨幅大（涨幅前100）/ 跌幅大（跌幅前50）与 成交额大（成交额前150）。 */
+  moverTags?: MoverTag[];
 }
 
 export interface RelatedStock {
@@ -155,7 +180,10 @@ export interface SystemStatus {
 
 export interface StockListResponse {
   items: StockSnapshot[];
+  /** 筛选与排序后的实际条数（表格“筛选结果”）。 */
   total: number;
+  /** 当前范围内未过滤的股票总数（页头徽标，不随筛选/排序变化）。 */
+  universeTotal: number;
   analyzed: number;
   page: number;
   pageSize: number;

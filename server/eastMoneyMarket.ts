@@ -414,8 +414,9 @@ export function eastMoneyQuoteUrl(code: string): string {
 
 /**
  * Fetches the realtime intraday trend (one point per minute, with average
- * price line). The primary realtime host is tried first and the delayed host
- * second; both serve the same trends2 payload format.
+ * price line). Source priority: EastMoney realtime host → Tencent intraday
+ * (seconds-level realtime) → EastMoney delayed host. During lunch break or
+ * after close the last point naturally stops moving.
  */
 export async function fetchEastMoneyTrends(
   options: FetchTrendsOptions,
@@ -423,20 +424,26 @@ export async function fetchEastMoneyTrends(
   const code = normalizeCode(options.code);
   const timeoutMs = options.timeoutMs ?? 12_000;
   const fetchedAt = new Date().toISOString();
-  let primaryError: unknown;
+  const errors: unknown[] = [];
   try {
     return await fetchTrendsFrom(PRIMARY_MARKET_BASE, code, timeoutMs, fetchedAt, options.signal);
   } catch (error) {
-    primaryError = error;
+    errors.push(error);
+  }
+  try {
+    return await fetchTencentTrends(code, timeoutMs, fetchedAt, options.signal);
+  } catch (error) {
+    errors.push(error);
   }
   try {
     return await fetchTrendsFrom(DELAYED_MARKET_BASE, code, timeoutMs, fetchedAt, options.signal);
-  } catch (delayedError) {
-    throw new AggregateError(
-      [primaryError, delayedError],
-      `东方财富分时主接口与延迟备选接口均不可用：${errorMessage(primaryError)}；${errorMessage(delayedError)}`,
-    );
+  } catch (error) {
+    errors.push(error);
   }
+  throw new AggregateError(
+    errors,
+    `东方财富分时实时、腾讯分时与东方财富延迟备选接口均不可用：${errors.map(errorMessage).join("；")}`,
+  );
 }
 
 async function fetchTrendsFrom(
@@ -473,6 +480,56 @@ async function fetchTrendsFrom(
     code,
     name: String(payload.data.name ?? "").trim(),
     previousClose: finite(payload.data.preClose),
+    fetchedAt,
+    items,
+  };
+}
+
+/**
+ * 腾讯分时（秒级实时）：day/query 返回最近 5 个交易日，data[0] 为当日，
+ * 行格式 HHMM 价格 累计成交量(手) 累计成交额(元)，均价由后两者推算。
+ */
+async function fetchTencentTrends(
+  code: string,
+  timeoutMs: number,
+  fetchedAt: string,
+  signal?: AbortSignal,
+): Promise<EastMoneyTrendResult> {
+  const symbol = tencentSymbol(code);
+  const endpoint = `${TENCNET_DAILY_BASE}/appstock/app/day/query?code=${symbol}`;
+  const payload = await fetchJson(endpoint, timeoutMs, signal) as {
+    code?: number;
+    data?: Record<string, { data?: Array<{ date?: string; data?: Array<string | number>; prec?: unknown }> }>;
+  };
+  const section = payload.data?.[symbol] ?? payload.data?.[Object.keys(payload.data ?? {})[0] ?? ""];
+  const days = Array.isArray(section?.data) ? section.data : [];
+  const today = days.find((day) => typeof day === "object" && day !== null && Array.isArray(day.data) && day.data.length > 1);
+  const rows = today?.data ?? [];
+  if (payload.code !== 0 || !rows.length) throw new Error(`腾讯未返回 ${code} 的有效分时数据`);
+  const items: EastMoneyTrendPoint[] = [];
+  for (const row of rows) {
+    const parts = String(row).split(" ");
+    if (parts.length < 3) continue;
+    const time = parts[0];
+    const price = finite(parts[1]);
+    const volume = finite(parts[2]);
+    const amount = finite(parts[3]);
+    if (!/^\d{4}$/.test(time) || price === null || volume === null || volume <= 0) continue;
+    const avgPrice = amount !== null ? Number((amount / (volume * 100)).toFixed(3)) : null;
+    items.push({
+      time: `${time.slice(0, 2)}:${time.slice(2)}`,
+      price,
+      volume,
+      avgPrice,
+    });
+  }
+  if (!items.length) throw new Error(`腾讯返回的 ${code} 分时数据无法解析`);
+  return {
+    provider: "eastmoney",
+    endpoint,
+    code,
+    name: "",
+    previousClose: finite(today?.prec),
     fetchedAt,
     items,
   };

@@ -1,4 +1,5 @@
 import type { SourceKind } from "../src/domain/types.ts";
+import { diagLog } from "./diagLog.ts";
 import { fetchAuthorizedForumClues, isForumFeedConfigured } from "./forumFeed.ts";
 import { fetchUserDiscussionClues, type DiscussionSourceState } from "./userPosts.ts";
 
@@ -34,15 +35,19 @@ interface LiveClueBundle {
 
 let clueCache: Cache<LiveClueBundle> | null = null;
 
-export async function getLiveClues(force = false, watchlist: string[] = []): Promise<LiveClueBundle & { updatedAt: string; cached: boolean }> {
+export async function getLiveClues(force = false, watchlist: string[] = [], stockNames?: Map<string, string>): Promise<LiveClueBundle & { updatedAt: string; cached: boolean }> {
   const focusKey = [...watchlist].sort().join(",");
   if (!force && clueCache && clueCache.key === focusKey && clueCache.expiresAt > Date.now()) {
     return { ...clueCache.value, updatedAt: clueCache.updatedAt, cached: true };
   }
   const forumEnabled = isForumFeedConfigured();
+  diagLog("clues", "四源拉取开始", watchlist.length, "只");
+  const allSettledAt = Date.now();
   const [news, announcements, forum, discussions] = await Promise.allSettled([
-    fetchFastNews(), fetchAnnouncements(), fetchAuthorizedForumClues(watchlist), fetchUserDiscussionClues(watchlist, force),
+    fetchFastNews(), fetchAnnouncements(), fetchAuthorizedForumClues(watchlist), fetchUserDiscussionClues(watchlist, force, stockNames),
   ]);
+  const settled = (result: PromiseSettledResult<unknown>) => (result.status === "fulfilled" ? "ok" : "fail");
+  diagLog("clues", "四源就绪", `${(Date.now() - allSettledAt) / 1000}s`, `news=${settled(news)}`, `announcements=${settled(announcements)}`, `forum=${settled(forum)}`, `discussions=${settled(discussions)}`);
   const failures: string[] = [];
   const items: RawClue[] = [];
   if (news.status === "fulfilled") items.push(...news.value);

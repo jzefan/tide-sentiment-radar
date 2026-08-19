@@ -3,11 +3,17 @@ import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StockSnapshot } from "../src/domain/types.ts";
-import { addToWatchlist, getClueCount, getEastMoneyDailyBars, getProviderState, getWatchlist, removeFromWatchlist, saveEastMoneyDailyBars, saveProviderState } from "./database.ts";
+import { addToWatchlist, getClueCount, getDailySentiment, getEastMoneyDailyBars, getMarketQuotesByTradeDate, getProviderState, getRecentAmounts, getWatchlist, listTradeDates, removeFromWatchlist, saveEastMoneyDailyBars, savePushedXueqiuDiscussions, saveProviderState } from "./database.ts";
 import { fetchEastMoneyDailyBars, fetchEastMoneyPeriodBars, fetchEastMoneyTrends } from "./eastMoneyMarket.ts";
-import { buildDashboard, buildRadarSnapshot, stockEvents } from "./radarEngine.ts";
+import { loadXueqiuCookie } from "./xueqiuSession.ts";
+import { importXueqiuCookieVerified, launchXueqiuBrowserLogin, verifyAndSaveXueqiuCookie } from "./xueqiuBrowser.ts";
+import { pinyin } from "pinyin-pro";
+import { buildDashboard, buildHistoricalStocks, buildRadarSnapshot, stockEvents } from "./radarEngine.ts";
 
+loadXueqiuCookie();
 const port = Number(process.env.API_PORT || 8787);
+// 绑定 0.0.0.0 以便从外部（浏览器）访问；如只需本机访问，可设 API_HOST=127.0.0.1
+const host = process.env.API_HOST || "0.0.0.0";
 const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
 const historyRequests = new Map<string, Promise<{ priceHistory: Array<{ date: string; close: number; volume?: number }>; state: "fresh" | "stale" | "unavailable" }>>();
@@ -54,27 +60,63 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
     const signal = url.searchParams.get("signal") ?? "all";
     const market = url.searchParams.get("market") ?? "all";
     const sort = url.searchParams.get("sort") ?? "alert";
-    const watchlistOnly = url.searchParams.get("watchlist") === "only";
+    const tagFilter = (url.searchParams.get("tags") ?? "").split(",").map((value) => value.trim()).filter(Boolean);
+    const requestedScope = url.searchParams.get("scope") ?? "movers";
+    const scope = new Set(["all", "movers", "watchlist"]).has(requestedScope) ? requestedScope : "movers";
+    const requestedDate = url.searchParams.get("date")?.trim() ?? "";
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(requestedDate) ? requestedDate : "";
     const page = Math.max(1, Number(url.searchParams.get("page") || 1));
     const pageSize = Math.min(100, Math.max(10, Number(url.searchParams.get("page_size") || 50)));
 
-    let items = snapshot.stocks.filter((item) => {
-      const matchesQuery = !query || `${item.name}${item.code}${item.market}${item.topics.join("")}`.toLowerCase().includes(query);
+    // 历史交易日：从已保存的每日行情构建该日股票快照（无当日舆情，异动标签按该日行情计算）。
+    const historical = Boolean(date) && date !== snapshot.tradeDate;
+    let stocks = snapshot.stocks;
+    let asOf = snapshot.asOf;
+    if (historical) {
+      const quotes = getMarketQuotesByTradeDate(date);
+      if (!quotes.length) {
+        return json(response, 404, { code: "NO_DATA_FOR_DATE", message: `该交易日（${date}）没有已保存的完整行情快照`, requestId });
+      }
+      stocks = buildHistoricalStocks(quotes, watchlist, date, getDailySentiment(date));
+      asOf = stocks[0]?.asOf ?? `${date}T15:00:00+08:00`;
+    }
+
+    // 异动候选（movers/all）展示全市场股票，符合异动条件的股票带异动标签；
+    // 我的自选（watchlist）只保留自选股。搜索始终在全市场范围内进行。
+    const scopeItems = stocks.filter((item) => scope === "watchlist" ? item.isWatchlisted : true);
+    // 页面标题右侧永远展示全市场股票总数（不随范围与筛选变化）。
+    const universeTotal = stocks.length;
+    let items = scopeItems.filter((item) => {
+      const matchesQuery = !query || `${item.name}${item.code}${item.market}${item.topics.join("")}`.toLowerCase().includes(query) || stockNameInitials(item.name).includes(query);
       const matchesSignal = signal === "all" || item.signal === signal;
       const matchesMarket = market === "all" || item.market === market;
-      return matchesQuery && matchesSignal && matchesMarket && (!watchlistOnly || item.isWatchlisted);
+      const matchesTag = tagFilter.length === 0 || (item.moverTags ?? []).some((tag) => tagFilter.includes(tag));
+      return matchesQuery && matchesSignal && matchesMarket && matchesTag;
     });
+    // 全市场口径不做“无分隐藏”：异动分/方向分排序时无分股票沉底即可，保证始终展示全市场。
     items = [...items].sort((a, b) => compareStocks(a, b, sort));
     const total = items.length;
     const start = (page - 1) * pageSize;
+    const pageItems = items.slice(start, start + pageSize);
+    const amountHistory = getRecentAmounts(pageItems.map((item) => item.code), 5, historical ? date : undefined);
+    const enriched = pageItems.map((item) => ({
+      ...item,
+      amountHistory: (amountHistory.get(item.code) ?? []).map((point) => ({ date: point.tradeDate, amount: point.amount })),
+    }));
     return json(response, 200, {
-      items: items.slice(start, start + pageSize),
+      items: enriched,
       total,
-      analyzed: snapshot.stocks.filter((item) => item.analysisStatus === "scored").length,
+      universeTotal,
+      analyzed: stocks.filter((item) => item.analysisStatus === "scored").length,
       page,
       pageSize,
-      asOf: snapshot.asOf,
+      asOf,
     });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/trade-dates") {
+    const dates = listTradeDates();
+    return json(response, 200, { dates, latest: dates[0] ?? null });
   }
 
   const stockMatch = url.pathname.match(/^\/api\/stocks\/(\d{6})$/);
@@ -130,6 +172,67 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
     return json(response, 200, { codes: removeFromWatchlist(watchlistMatch[1]) });
   }
 
+  if (request.method === "POST" && url.pathname === "/api/xueqiu/browser-login") {
+    try {
+      const result = await launchXueqiuBrowserLogin();
+      return json(response, result.ok ? 200 : 400, { ...result, requestId });
+    } catch (error) {
+      return json(response, 400, { code: "BROWSER_UNAVAILABLE", message: error instanceof Error ? error.message : "浏览器登录不可用", retryable: false, requestId });
+    }
+  }
+
+  if (request.method === "POST" && url.pathname === "/api/xueqiu/cookie") {
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    try {
+      const payload = JSON.parse(body) as { cookie?: string };
+      const result = await verifyAndSaveXueqiuCookie(payload.cookie ?? "");
+      return json(response, result.ok ? 200 : 400, { ...result, requestId });
+    } catch {
+      return json(response, 400, { code: "BAD_JSON", message: "请求体必须是 JSON", requestId });
+    }
+  }
+
+  // 仅供本机命令行（pnpm xueqiu:session）导入已由用户浏览器验证过的会话。
+  if (request.method === "POST" && url.pathname === "/api/xueqiu/cookie/browser-verified") {
+    if (!isLoopback(request)) {
+      return json(response, 403, { code: "FORBIDDEN", message: "该接口仅允许本机调用", requestId });
+    }
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    try {
+      const payload = JSON.parse(body) as { cookie?: string };
+      const result = await importXueqiuCookieVerified(payload.cookie ?? "");
+      return json(response, result.ok ? 200 : 400, { ...result, requestId });
+    } catch {
+      return json(response, 400, { code: "BAD_JSON", message: "请求体必须是 JSON", requestId });
+    }
+  }
+
+  // 本机同步推送：接收由 scripts/sync-xueqiu.ts 抓取并推来的雪球讨论。
+  // 服务器自身不直连雪球，仅通过该令牌保护的端点接收数据。
+  if (request.method === "POST" && url.pathname === "/api/xueqiu/push") {
+    const expectedToken = process.env.XUEQIU_SYNC_TOKEN?.trim();
+    if (!expectedToken) {
+      return json(response, 403, { code: "PUSH_DISABLED", message: "推送功能未启用，请在服务器 .env 设置 XUEQIU_SYNC_TOKEN", retryable: false, requestId });
+    }
+    const providedToken = (request.headers["x-sync-token"] as string | undefined) ?? url.searchParams.get("token") ?? "";
+    if (providedToken !== expectedToken) {
+      return json(response, 403, { code: "FORBIDDEN", message: "同步令牌无效", retryable: false, requestId });
+    }
+    let body = "";
+    for await (const chunk of request) body += chunk;
+    try {
+      const payload = JSON.parse(body) as { items?: unknown };
+      const rawItems = Array.isArray(payload.items) ? payload.items : [];
+      const clues = rawItems.map(parsePushedXueqiuClue).filter((clue): clue is NonNullable<typeof clue> => Boolean(clue));
+      const saved = savePushedXueqiuDiscussions(clues);
+      return json(response, 200, { ok: true, accepted: clues.length, saved, requestId });
+    } catch {
+      return json(response, 400, { code: "BAD_JSON", message: "请求体必须是 JSON", requestId });
+    }
+  }
+
   if (request.method === "GET" && url.pathname === "/api/system") {
     return json(response, 200, await systemStatus(false));
   }
@@ -151,6 +254,7 @@ async function systemStatus(force: boolean) {
     { id: "eastmoney-guba" as const, name: "东方财富股吧", state: "degraded" as const, detail: "尚未完成首次同步", count: 0 },
     { id: "eastmoney-guba-replies" as const, name: "东方财富股吧评论", state: "degraded" as const, detail: "尚未完成首次同步", count: 0 },
     { id: "xueqiu" as const, name: "雪球讨论", state: "disabled" as const, detail: "需要用户提供合法会话；未配置", count: 0 },
+    { id: "weibo" as const, name: "微博讨论", state: "disabled" as const, detail: "需要本机浏览器；未配置", count: 0 },
     { id: "ths-circle" as const, name: "同花顺圈子", state: "disabled" as const, detail: "等待平台授权数据接口", count: 0 },
   ];
   return {
@@ -188,6 +292,8 @@ interface KlineResponse {
   period: "minute" | "daily" | "weekly" | "monthly";
   source: "eastmoney" | "tencent-mirror" | "cache";
   state: "fresh" | "stale" | "unavailable";
+  /** 分时图的昨日收盘价（用于计算相对昨收的实时涨跌幅）。 */
+  previousClose?: number | null;
   items: KlinePoint[];
 }
 
@@ -207,6 +313,7 @@ async function loadKline(code: string, period: "minute" | "daily" | "weekly" | "
         period,
         source: "eastmoney",
         state: "fresh",
+        previousClose: remote.previousClose,
         items: remote.items.map((point) => ({
           time: point.time,
           open: point.price,
@@ -280,18 +387,80 @@ function toPricePoints(bars: ReturnType<typeof getEastMoneyDailyBars>) {
   return bars.map((bar) => ({ date: bar.tradeDate, close: bar.close, ...(bar.volume === null ? {} : { volume: bar.volume }) }));
 }
 
-function compareStocks(a: StockSnapshot, b: StockSnapshot, sort: string) {
-  if (sort === "direction") return (b.radarScore ?? -1) - (a.radarScore ?? -1);
-  if (sort === "attention") return b.factors.attention - a.factors.attention;
-  if (sort === "mentions") return b.mentionCount - a.mentionCount;
-  if (sort === "risk") return (a.radarScore ?? 101) - (b.radarScore ?? 101);
-  if (sort === "market") return b.price * b.pctChange - a.price * a.pctChange;
-  if (a.isWatchlisted !== b.isWatchlisted) return a.isWatchlisted ? -1 : 1;
-  return (b.alertScore ?? -1) - (a.alertScore ?? -1);
+/** 股票名称拼音首字母缓存（如 中国平安 → zgpa），支撑拼音缩写搜索。 */
+const nameInitialsCache = new Map<string, string>();
+
+function stockNameInitials(name: string): string {
+  const cached = nameInitialsCache.get(name);
+  if (cached !== undefined) return cached;
+  let initials = "";
+  try {
+    initials = pinyin(name, { pattern: "first", toneType: "none", type: "array" }).join("").toLowerCase();
+  } catch {
+    initials = "";
+  }
+  nameInitialsCache.set(name, initials);
+  return initials;
 }
 
-function json(response: ServerResponse, status: number, payload: unknown) {
-  response.writeHead(status, {
+/**
+ * 排序键：alert 异动分、direction 方向分（正）、risk 方向分（负）、attention
+ * 讨论热度、consensus 观点共识、mentions 关联线索、pct 实时涨跌、market 市场表现。
+ * 前缀 "-" 表示升序（小→大），默认降序。alert 的自选股优先不随方向反转。
+ */
+function compareStocks(a: StockSnapshot, b: StockSnapshot, sort: string) {
+  const ascending = sort.startsWith("-");
+  const key = ascending ? sort.slice(1) : sort;
+  let result: number;
+  if (key === "direction") result = (b.radarScore ?? -1) - (a.radarScore ?? -1);
+  else if (key === "amount") result = b.amount - a.amount;
+  else if (key === "attention") result = b.factors.attention - a.factors.attention;
+  else if (key === "consensus") result = b.factors.consensus - a.factors.consensus;
+  else if (key === "mentions") result = b.mentionCount - a.mentionCount;
+  else if (key === "pct") result = b.pctChange - a.pctChange;
+  else if (key === "risk") result = (a.radarScore ?? 101) - (b.radarScore ?? 101);
+  else if (key === "market") result = b.price * b.pctChange - a.price * a.pctChange;
+  else {
+    if (a.isWatchlisted !== b.isWatchlisted) return a.isWatchlisted ? -1 : 1;
+    result = (b.alertScore ?? -1) - (a.alertScore ?? -1);
+  }
+  return ascending ? -result : result;
+}
+
+/** 仅放行本机回环地址，用于信任命令行导入的接口。 */
+function isLoopback(request: IncomingMessage): boolean {
+  const address = request.socket.remoteAddress ?? "";
+  return address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
+}
+
+/** 校验并规整一条由本机推送来的雪球讨论线索（只接受最小可信字段）。 */
+function parsePushedXueqiuClue(raw: unknown): { id: string; source: string; sourceKind: "forum"; title: string; summary: string; publishedAt: string; url: string; stockCodes: string[]; interactionCount: number } | null {
+  if (!raw || typeof raw !== "object") return null;
+  const record = raw as Record<string, unknown>;
+  const id = String(record.id ?? "").trim();
+  const title = String(record.title ?? "").trim().slice(0, 240);
+  const publishedAt = String(record.publishedAt ?? "").trim();
+  if (!id || !title || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(publishedAt)) return null;
+  const stockCodes = Array.isArray(record.stockCodes)
+    ? (record.stockCodes as unknown[]).map(String).filter((code) => /^\d{6}$/.test(code))
+    : [];
+  const summary = String(record.summary ?? title).trim().slice(0, 500);
+  const url = String(record.url ?? "").slice(0, 2000);
+  const interactionCount = Number(record.interactionCount);
+  return {
+    id,
+    source: "雪球讨论",
+    sourceKind: "forum",
+    title,
+    summary,
+    publishedAt,
+    url,
+    stockCodes,
+    interactionCount: Number.isFinite(interactionCount) && interactionCount > 0 ? Math.trunc(interactionCount) : 0,
+  };
+}
+
+function json(response: ServerResponse, status: number, payload: unknown) {  response.writeHead(status, {
     "content-type": "application/json; charset=utf-8",
     "cache-control": "no-store",
     "access-control-allow-origin": "*",
@@ -322,10 +491,10 @@ async function serveStatic(response: ServerResponse, pathname: string) {
     response.end(body);
   } catch {
     response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-    response.end("请先运行 pnpm build，或在开发模式使用 pnpm dev。\n");
+    response.end("请先运行 npm run build，或在开发模式使用 npm run dev。\n");
   }
 }
 
-server.listen(port, "127.0.0.1", () => {
-  console.log(`潮汐接口服务已启动：http://127.0.0.1:${port}`);
+server.listen(port, host, () => {
+  console.log(`潮汐接口服务已启动：http://${host}:${port}`);
 });

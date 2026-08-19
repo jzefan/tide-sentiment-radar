@@ -78,7 +78,7 @@ export function AppShell() {
           connectionLive={connectionLive}
         />
         <SidebarInset>
-          <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b px-4 sm:px-6">
+          <header className="flex h-12 shrink-0 items-center justify-between gap-3 border-b px-4 sm:px-6">
             <div className="flex items-center gap-3">
               <SidebarTrigger className="-ml-1" />
               <Separator orientation="vertical" className="mr-1 hidden h-4 sm:block" />
@@ -106,7 +106,7 @@ export function AppShell() {
             </NavLink>
           </header>
           <main id="main-content" className="flex flex-1 flex-col">
-            <div className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-7 sm:px-6 lg:px-8 lg:py-9">
+            <div className="mx-auto w-full max-w-[1500px] flex-1 px-4 py-4 sm:px-6 lg:px-8 lg:py-5">
               <Outlet />
             </div>
           </main>
