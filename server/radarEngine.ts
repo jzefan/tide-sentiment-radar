@@ -13,7 +13,8 @@ import { getClueCount, getStoredClues, saveClues, saveDailySentiment } from "./d
 import { diagLog } from "./diagLog.ts";
 import { getLiveClues, type RawClue } from "./eastMoney.ts";
 import type { EastMoneyMarketQuote } from "./eastMoneyMarket.ts";
-import { syncMarketQuotes, type MarketQuote } from "./marketSync.ts";
+import { isTradingSession } from "../src/domain/marketCalendar.ts";
+import { readStoredMarketQuotes, syncMarketQuotes, type MarketQuote, type MarketSyncResult } from "./marketSync.ts";
 import { classifyText } from "./sentiment.ts";
 import type { DiscussionSourceState } from "./userPosts.ts";
 
@@ -46,6 +47,10 @@ export interface MoverSelection {
   gainers: Set<string>;
   losers: Set<string>;
   focusCodes: string[];
+  /** 涨幅榜名次（1-based，涨幅最大第 1）。 */
+  gainRank: Map<string, number>;
+  /** 跌幅榜名次（1-based，跌幅最大第 1）。 */
+  lossRank: Map<string, number>;
 }
 
 /** 按口径从行情列表筛选当日异动股（三者取并集）。 */
@@ -55,22 +60,20 @@ export function selectMovers(items: MarketQuote[]): MoverSelection {
     .slice(0, MOVER_AMOUNT_TOP)
     .map((quote) => quote.code);
   const turnoverHeavy = new Set(byAmount);
-  const gainers = new Set(
-    [...items]
-      .filter((quote) => quote.pctChange > 0)
-      .sort((a, b) => b.pctChange - a.pctChange)
-      .slice(0, MOVER_GAIN_TOP)
-      .map((quote) => quote.code),
-  );
-  const losers = new Set(
-    [...items]
-      .filter((quote) => quote.pctChange < 0)
-      .sort((a, b) => a.pctChange - b.pctChange)
-      .slice(0, MOVER_LOSS_TOP)
-      .map((quote) => quote.code),
-  );
+  const gainerList = [...items]
+    .filter((quote) => quote.pctChange > 0)
+    .sort((a, b) => b.pctChange - a.pctChange)
+    .slice(0, MOVER_GAIN_TOP);
+  const loserList = [...items]
+    .filter((quote) => quote.pctChange < 0)
+    .sort((a, b) => a.pctChange - b.pctChange)
+    .slice(0, MOVER_LOSS_TOP);
+  const gainers = new Set(gainerList.map((quote) => quote.code));
+  const losers = new Set(loserList.map((quote) => quote.code));
+  const gainRank = new Map(gainerList.map((quote, index) => [quote.code, index + 1]));
+  const lossRank = new Map(loserList.map((quote, index) => [quote.code, index + 1]));
   const focusCodes = [...new Set([...gainers, ...losers, ...byAmount])];
-  return { turnoverHeavy, gainers, losers, focusCodes };
+  return { turnoverHeavy, gainers, losers, focusCodes, gainRank, lossRank };
 }
 
 /** 从快照股票中提取可沉淀的当日舆情字段（仅对已评分股票）。 */
@@ -110,7 +113,7 @@ export function buildHistoricalStocks(
       turnover: quote.turnover ?? 0,
       marketCap: quote.marketCap ?? 0,
     }));
-  const { turnoverHeavy, gainers, losers } = selectMovers(normalized);
+  const { turnoverHeavy, gainers, losers, gainRank, lossRank } = selectMovers(normalized);
   const selected = new Set(watchlist);
   const asOf = normalized[0]?.quoteAt ?? `${tradeDate}T15:00:00+08:00`;
   return normalized.map((quote) => {
@@ -118,41 +121,101 @@ export function buildHistoricalStocks(
     if (gainers.has(quote.code)) tags.push("涨幅大");
     if (losers.has(quote.code)) tags.push("跌幅大");
     if (turnoverHeavy.has(quote.code)) tags.push("成交额大");
-    const base = aggregateStock(quote, [], selected.has(quote.code), asOf, tags);
+    const base = aggregateStock(quote, [], selected.has(quote.code), asOf, tags, gainRank.get(quote.code) ?? lossRank.get(quote.code) ?? null);
     const sentiment = sentimentByCode?.get(quote.code);
     return sentiment ? { ...base, ...sentiment } : base;
   });
 }
 
-let snapshotCache: { value: RadarSnapshot; expiresAt: number } | null = null;
-/** 单飞锁：同一时刻只允许一个快照构建，其余请求等待同一结果，避免冷启动并发风暴。 */
-let activeBuild: Promise<RadarSnapshot> | null = null;
+/** 定时抓取周期：行情约每分钟一次；讨论层内部另有 5 分钟缓存，所有抓取都在后台进行。 */
+const SNAPSHOT_REFRESH_MS = 60_000;
 
+/** 当前快照（内存缓存，由后台定时任务刷新；接口只读它，绝不阻塞等待远端抓取）。 */
+let currentSnapshot: RadarSnapshot | null = null;
+/** 单飞锁：同一时刻只允许一次后台刷新。 */
+let refreshPromise: Promise<void> | null = null;
+let refreshTimer: ReturnType<typeof setInterval> | null = null;
+
+/**
+ * 接口统一入口：
+ * - 默认（force=false）：立即返回当前快照，排序/筛选/分页在内存完成，不触发任何远端抓取；
+ * - 冷启动（尚无快照）：先用数据库已存数据快速构建一版，同时后台开始实时抓取；
+ * - force=true（数据源页“立即刷新”）：等待一次后台抓取完成后返回。
+ */
 export function buildRadarSnapshot(watchlist: string[], force = false): Promise<RadarSnapshot> {
-  if (!force && snapshotCache && snapshotCache.expiresAt > Date.now()) {
-    return Promise.resolve(withWatchlist(snapshotCache.value, watchlist));
+  if (force) {
+    // 手动“立即刷新”：无论是否交易时段都做完整抓取。
+    return refreshSnapshot(false).then(() => withWatchlist(currentSnapshot!, watchlist));
   }
-  if (activeBuild && !force) {
-    // 已有构建进行中：共享同一结果（自选股按请求单独套用）。
-    return activeBuild.then((value) => withWatchlist(value, watchlist));
+  if (currentSnapshot) {
+    return Promise.resolve(withWatchlist(currentSnapshot, watchlist));
   }
-  activeBuild = buildSnapshotInner(watchlist, force).finally(() => {
-    activeBuild = null;
-  });
-  return activeBuild;
+  return buildFromStore().then(() => withWatchlist(currentSnapshot!, watchlist));
+}
+
+/** 冷启动：优先用数据库已存行情+线索构建（不联网）；无存库数据时才等待首次实时抓取。 */
+async function buildFromStore(): Promise<void> {
+  const stored = readStoredMarketQuotes();
+  if (stored) {
+    const value = buildSnapshotFromStore(stored);
+    if (!currentSnapshot) currentSnapshot = value;
+  } else {
+    await refreshSnapshot();
+  }
+}
+
+/**
+ * 后台刷新（单飞）：交易时段（9:15–11:30、13:00–15:00）抓取行情+全部线索；
+ * 休市期间行情用本地已存数据（不重复请求），线索（快讯/公告/论坛讨论）照常全量抓取。
+ * light 参数：null 表示按当前交易时段自动判断；false 强制完整抓取；true 强制轻量。
+ */
+function refreshSnapshot(light: boolean | null = null): Promise<void> {
+  if (refreshPromise) return refreshPromise;
+  const useLight = light ?? !isTradingSession(new Date());
+  diagLog("radar", useLight ? "休市轻量刷新（行情用存库，线索全量抓取）" : "交易时段完整刷新");
+  const build = useLight ? buildLightSnapshotInner() : buildSnapshotInner([], false);
+  refreshPromise = build
+    .then((value) => { currentSnapshot = value; })
+    .finally(() => { refreshPromise = null; });
+  return refreshPromise;
+}
+
+/** 启动后台定时抓取（服务启动时调用一次）。 */
+export function startScheduledRefresh(): void {
+  if (refreshTimer) return;
+  void refreshSnapshot();
+  refreshTimer = setInterval(() => void refreshSnapshot(), SNAPSHOT_REFRESH_MS);
+}
+
+/** 线索包：实时抓取与存库回退共用同一种结构。 */
+interface SnapshotClues {
+  items: RawClue[];
+  updatedAt: string;
+  failures: string[];
+  forumEnabled: boolean;
+  forumSource: string;
+  forumLicenseId: string | null;
+  forumTermsUrl: string | null;
+  discussionSources: DiscussionSourceState[];
 }
 
 async function buildSnapshotInner(watchlist: string[], force: boolean): Promise<RadarSnapshot> {
   diagLog("radar", "build 开始");
   const market = await syncMarketQuotes(force);
   diagLog("radar", "市场就绪", market.items.length, "只", market.stale ? "stale" : "fresh");
+  const value = await buildSnapshotFromMarket(market, force);
+  return withWatchlist(value, watchlist);
+}
+
+/** 行情就绪后共享的抓取+装配：异动集合、抓取全部线索（快讯/个股新闻/公告/论坛）、落库、评分。 */
+async function buildSnapshotFromMarket(market: MarketSyncResult, force: boolean): Promise<RadarSnapshot> {
   // 异动股集合（异动候选页范围），严格按口径筛选：
   //   - 成交额前 150（amount 降序）—— 承接全市场流动性主体；
   //   - 涨幅前 100（pctChange>0 降序）—— 当日最强多头；
   //   - 跌幅前 50（pctChange<0 升序，跌幅最大在前）—— 当日最强空头。
   // 三者取并集，确保入选标的确实是“成交活跃 / 涨跌幅显著”的股票，避免小涨小跌、低成交个股混入。
   // 讨论层只对这一集合扫股吧，控制抓取量；讨论层按可配置周期缓存，行情层仍实时。
-  const { turnoverHeavy, gainers, losers, focusCodes } = selectMovers(market.items);
+  const { focusCodes } = selectMovers(market.items);
   // 股票名称映射：微博等按名称搜索的讨论源使用。
   const stockNames = new Map(market.items.map((quote) => [quote.code, quote.name]));
   const liveClues = await getLiveClues(force, focusCodes, stockNames).catch((error) => {
@@ -162,8 +225,34 @@ async function buildSnapshotInner(watchlist: string[], force: boolean): Promise<
     });
   diagLog("radar", "线索就绪", liveClues.items.length, "条", liveClues.cached ? "(缓存)" : "");
   saveClues(liveClues.items);
+  return assembleSnapshot(market, liveClues);
+}
+
+/** 冷启动：只用数据库已存行情与线索构建快照（不联网，毫秒级；不重复落库舆情快照）。 */
+function buildSnapshotFromStore(market: MarketSyncResult): RadarSnapshot {
+  const stored = getStoredClues();
+  const clues: SnapshotClues = stored.length
+    ? { items: stored, updatedAt: stored[0]?.publishedAt ?? new Date().toISOString(), failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: [] }
+    : { items: [], updatedAt: new Date().toISOString(), failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: [] };
+  return assembleSnapshot(market, clues, false);
+}
+
+/**
+ * 休市轻量刷新：行情用本地已存数据（不重复请求），线索仍全量抓取
+ * （财经快讯、个股新闻、上市公司公告与论坛讨论照常更新），并落库。
+ */
+async function buildLightSnapshotInner(): Promise<RadarSnapshot> {
+  const market = readStoredMarketQuotes() ?? (await syncMarketQuotes(true));
+  if (!market) throw new Error("本地尚无已保存的完整行情快照");
+  diagLog("radar", "休市轻量刷新：行情用存库，线索全量抓取");
+  return buildSnapshotFromMarket(market, false);
+}
+
+/** 共享的分析装配：行情 + 线索 → 事件、评分、异动标签、舆情快照落库与快照对象。 */
+function assembleSnapshot(market: MarketSyncResult, clues: SnapshotClues, persistSentiment = true): RadarSnapshot {
+  const { turnoverHeavy, gainers, losers, gainRank, lossRank } = selectMovers(market.items);
   const quoteMap = new Map(market.items.map((quote) => [quote.code, quote]));
-  const events = linkAndAnalyzeClues(liveClues.items, market.items, quoteMap);
+  const events = linkAndAnalyzeClues(clues.items, market.items, quoteMap);
   const eventMap = new Map<string, SentimentEvent[]>();
   for (const event of events) {
     for (const related of event.relatedStocks) {
@@ -177,34 +266,35 @@ async function buildSnapshotInner(watchlist: string[], force: boolean): Promise<
     if (gainers.has(quote.code)) tags.push("涨幅大");
     if (losers.has(quote.code)) tags.push("跌幅大");
     if (turnoverHeavy.has(quote.code)) tags.push("成交额大");
-    return aggregateStock(quote, eventMap.get(quote.code) ?? [], false, market.updatedAt, tags);
+    const changeRank = gainRank.get(quote.code) ?? lossRank.get(quote.code) ?? null;
+    return aggregateStock(quote, eventMap.get(quote.code) ?? [], false, market.updatedAt, tags, changeRank);
   });
   // 每日舆情快照：把当日已评分股票的线索聚合结果沉淀到 SQLite，供历史交易日回看。
-  saveDailySentiment(
-    stocks
-      .map((stock) => ({ code: stock.code, tradeDate: market.tradeDate, sentiment: toDailySentiment(stock) }))
-      .filter((row): row is { code: string; tradeDate: string; sentiment: DailySentimentSnapshot } => row.sentiment !== null),
-  );
-  const value: RadarSnapshot = {
+  if (persistSentiment) {
+    saveDailySentiment(
+      stocks
+        .map((stock) => ({ code: stock.code, tradeDate: market.tradeDate, sentiment: toDailySentiment(stock) }))
+        .filter((row): row is { code: string; tradeDate: string; sentiment: DailySentimentSnapshot } => row.sentiment !== null),
+    );
+  }
+  return {
     quotes: market.items,
     stocks,
     events,
     asOf: market.updatedAt,
-    clueAsOf: liveClues.updatedAt,
-    clueFailures: liveClues.failures,
+    clueAsOf: clues.updatedAt,
+    clueFailures: clues.failures,
     clueCount: getClueCount(),
-    forumEnabled: liveClues.forumEnabled,
-    forumSource: liveClues.forumSource,
-    forumLicenseId: liveClues.forumLicenseId,
-    forumTermsUrl: liveClues.forumTermsUrl,
-    discussionSources: liveClues.discussionSources,
+    forumEnabled: clues.forumEnabled,
+    forumSource: clues.forumSource,
+    forumLicenseId: clues.forumLicenseId,
+    forumTermsUrl: clues.forumTermsUrl,
+    discussionSources: clues.discussionSources,
     marketStale: market.stale,
     marketCached: market.cached,
     marketSourceTier: market.sourceTier,
     tradeDate: market.tradeDate,
   };
-  snapshotCache = { value, expiresAt: Date.now() + 40_000 };
-  return withWatchlist(value, watchlist);
 }
 
 export function buildDashboard(snapshot: RadarSnapshot, watchlist: string[]): DashboardData {
@@ -306,7 +396,7 @@ function linkAndAnalyzeClues(clues: RawClue[], quotes: MarketQuote[], quoteMap: 
     .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
 }
 
-function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlisted: boolean, asOf: string, moverTags: Array<"涨幅大" | "跌幅大" | "成交额大"> = []): StockSnapshot {
+function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlisted: boolean, asOf: string, moverTags: Array<"涨幅大" | "跌幅大" | "成交额大"> = [], changeRank: number | null = null): StockSnapshot {
   if (!events.length) {
     const emptyFactors: ScoreFactors = { sentiment: 0, attention: 0, velocity: 0, consensus: 0, sourceQuality: 0, priceConfirm: 50, freshness: 0 };
     return {
@@ -327,6 +417,7 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
       asOf,
       isWatchlisted,
       moverTags,
+      changeRank,
     };
   }
 
@@ -379,6 +470,7 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
     asOf,
     isWatchlisted,
     moverTags,
+    changeRank,
   };
 }
 

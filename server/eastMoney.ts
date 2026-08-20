@@ -2,6 +2,7 @@ import type { SourceKind } from "../src/domain/types.ts";
 import { diagLog } from "./diagLog.ts";
 import { fetchAuthorizedForumClues, isForumFeedConfigured } from "./forumFeed.ts";
 import { fetchUserDiscussionClues, type DiscussionSourceState } from "./userPosts.ts";
+import { fetchStockNews } from "./eastMoneyNews.ts";
 
 const USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/136 Safari/537.36";
 export interface RawClue {
@@ -41,17 +42,19 @@ export async function getLiveClues(force = false, watchlist: string[] = [], stoc
     return { ...clueCache.value, updatedAt: clueCache.updatedAt, cached: true };
   }
   const forumEnabled = isForumFeedConfigured();
-  diagLog("clues", "四源拉取开始", watchlist.length, "只");
+  diagLog("clues", "五源拉取开始", watchlist.length, "只");
   const allSettledAt = Date.now();
-  const [news, announcements, forum, discussions] = await Promise.allSettled([
-    fetchFastNews(), fetchAnnouncements(), fetchAuthorizedForumClues(watchlist), fetchUserDiscussionClues(watchlist, force, stockNames),
+  const [news, stockNews, announcements, forum, discussions] = await Promise.allSettled([
+    fetchFastNews(), fetchStockNews(watchlist, stockNames ?? new Map()), fetchAnnouncements(), fetchAuthorizedForumClues(watchlist), fetchUserDiscussionClues(watchlist, force, stockNames),
   ]);
   const settled = (result: PromiseSettledResult<unknown>) => (result.status === "fulfilled" ? "ok" : "fail");
-  diagLog("clues", "四源就绪", `${(Date.now() - allSettledAt) / 1000}s`, `news=${settled(news)}`, `announcements=${settled(announcements)}`, `forum=${settled(forum)}`, `discussions=${settled(discussions)}`);
+  diagLog("clues", "五源就绪", `${(Date.now() - allSettledAt) / 1000}s`, `news=${settled(news)}`, `stockNews=${settled(stockNews)}`, `announcements=${settled(announcements)}`, `forum=${settled(forum)}`, `discussions=${settled(discussions)}`);
   const failures: string[] = [];
   const items: RawClue[] = [];
   if (news.status === "fulfilled") items.push(...news.value);
   else failures.push("财经快讯");
+  if (stockNews.status === "fulfilled") items.push(...stockNews.value);
+  else failures.push("个股新闻");
   if (announcements.status === "fulfilled") items.push(...announcements.value);
   else failures.push("公司公告");
   let forumSource = "论坛舆情 · 待授权接入";
@@ -72,7 +75,7 @@ export async function getLiveClues(force = false, watchlist: string[] = [], stoc
     failures.push("真实用户讨论");
   }
   const deduplicated = items
-    .filter((item, index, list) => list.findIndex((candidate) => candidate.id === item.id) === index)
+    .filter((item, index, list) => list.findIndex((candidate) => candidate.id === item.id || (item.url && item.url === candidate.url)) === index)
     .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
   if (!deduplicated.length) {
     if (clueCache) return { ...clueCache.value, updatedAt: clueCache.updatedAt, cached: true };

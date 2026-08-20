@@ -470,6 +470,10 @@ const upsertProvider = database.prepare(`
 export function saveCompleteMarketSnapshot(snapshot: EastMoneyMarketSnapshot): MarketSnapshotInfo {
   if (snapshot.provider !== "eastmoney") throw new Error("行情批次仅接受东方财富数据");
   if (snapshot.items.length < 4_000) throw new Error(`完整行情至少需要 4000 条，当前 ${snapshot.items.length} 条`);
+  // 占位行情（如盘前延迟接口返回 "-"）会被整批拒绝，避免污染「最新完整快照」导致全市场异动为空。
+  if (snapshot.items.filter((item) => item.price !== null).length < 4_000) {
+    throw new Error(`完整行情需要至少 4000 条含有效价格的记录，当前仅有 ${snapshot.items.filter((item) => item.price !== null).length} 条`);
+  }
   const uniqueCodes = new Set(snapshot.items.map((item) => item.code));
   if (uniqueCodes.size !== snapshot.items.length) throw new Error("完整行情批次包含重复股票代码");
   if (snapshot.items.some((item) => item.tradeDate !== snapshot.tradeDate)) {
@@ -601,12 +605,16 @@ export function recordMarketSnapshotFailure(input: {
   };
 }
 
+/** 有有效价格记录的完整快照数量下限（低于此值视为占位/异常批次，不当作完整行情）。 */
+const MIN_VALID_PRICE_ROWS = 4_000;
+
 export function getLatestCompleteMarketSnapshot(): CompleteMarketSnapshot | null {
   const row = database.prepare(`
     SELECT * FROM market_quote_snapshots
     WHERE status = 'complete'
+      AND (SELECT COUNT(*) FROM market_daily_quotes q WHERE q.snapshot_id = market_quote_snapshots.id AND q.price IS NOT NULL) >= ?
     ORDER BY fetched_at DESC LIMIT 1
-  `).get() as Record<string, unknown> | undefined;
+  `).get(MIN_VALID_PRICE_ROWS) as Record<string, unknown> | undefined;
   if (!row) return null;
   const info = marketSnapshotFromRow(row);
   return {
@@ -620,8 +628,9 @@ export function getLatestCompleteMarketQuotes(): EastMoneyMarketQuote[] {
   const snapshot = database.prepare(`
     SELECT id FROM market_quote_snapshots
     WHERE status = 'complete'
+      AND (SELECT COUNT(*) FROM market_daily_quotes q WHERE q.snapshot_id = market_quote_snapshots.id AND q.price IS NOT NULL) >= ?
     ORDER BY fetched_at DESC LIMIT 1
-  `).get() as { id: string } | undefined;
+  `).get(MIN_VALID_PRICE_ROWS) as { id: string } | undefined;
   return snapshot ? getMarketQuotesBySnapshot(snapshot.id) : [];
 }
 

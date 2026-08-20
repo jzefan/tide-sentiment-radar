@@ -72,8 +72,8 @@ export async function fetchUserDiscussionClues(stockCodes: string[], force = fal
 async function buildUserDiscussionBundle(codes: string[], names?: Map<string, string>): Promise<UserDiscussionBundle> {
   if (!codes.length) return {
     items: [], failures: [], sources: [
-      { id: "eastmoney-guba", name: "东方财富股吧", state: "disabled", detail: "暂无重点股票", count: 0 },
-      { id: "eastmoney-guba-replies", name: "东方财富股吧评论", state: "disabled", detail: "暂无重点股票", count: 0 },
+      { id: "eastmoney-guba", name: "东方财富股吧", state: "degraded", detail: "行情源暂未提供有效股票（可能是东方财富行情接口异常），股吧帖子扫描自动跳过", count: 0 },
+      { id: "eastmoney-guba-replies", name: "东方财富股吧评论", state: "degraded", detail: "行情源暂未提供有效股票（可能是东方财富行情接口异常），评论抓取自动跳过", count: 0 },
       xueqiuDisabledState(),
       weiboDisabledState(),
       thsDisabledState(),
@@ -215,12 +215,18 @@ async function resolveWeibo(codes: string[], names?: Map<string, string>): Promi
     return disabled("微博浏览器会话暂不可用，稍后自动重试");
   }
 
-  const keywords = codes
-    .map((code) => ({ code, keyword: names?.get(code)?.trim() ?? "" }))
-    .filter((item) => item.keyword);
-  if (!keywords.length) return disabled("暂无股票名称，无法搜索微博讨论");
+  // 双形态检索：讨论中有的用股票名称、有的用 6 位代码，两者都作为关键词搜索，
+  // 统一映射回同一股票代码。名称在前、代码在后，预算耗尽时优先覆盖名称形态。
+  const keywords = codes.flatMap((code): Array<{ code: string; keyword: string; kind: "name" | "code" }> => {
+    const name = names?.get(code)?.trim() ?? "";
+    const list: Array<{ code: string; keyword: string; kind: "name" | "code" }> = [];
+    if (name) list.push({ code, keyword: name, kind: "name" });
+    list.push({ code, keyword: code, kind: "code" });
+    return list;
+  });
+  if (!keywords.length) return disabled("暂无股票名称或代码，无法搜索微博讨论");
 
-  const keywordToCode = new Map(keywords.map((item) => [item.keyword, item.code]));
+  const keywordToCode = new Map(keywords.map((item) => [item.keyword, { code: item.code, kind: item.kind }]));
   const cutoff = Date.now() - RECENT_HOURS * 3_600_000;
   const deadline = Date.now() + WEIBO_CYCLE_BUDGET_MS;
   // 轮转起始下标：每轮从不同位置开始，保证预算内覆盖不全时长期能轮到全部股票。
@@ -271,9 +277,11 @@ async function resolveWeibo(codes: string[], names?: Map<string, string>): Promi
         failureReasons[reason] = (failureReasons[reason] ?? 0) + 1;
         continue;
       }
-      const code = keywordToCode.get(result.keyword) ?? "";
+      const matched = keywordToCode.get(result.keyword);
+      const code = matched?.code ?? "";
+      const kind = matched?.kind ?? "name";
       for (const row of result.mblogs) {
-        const clue = mapWeiboRow(row, code, result.keyword, cutoff);
+        const clue = mapWeiboRow(row, code, result.keyword, cutoff, kind);
         if (clue) items.push(clue);
       }
     }
@@ -341,10 +349,12 @@ function parseWeiboTime(value: string): Date | null {
 }
 
 /** 把微博搜索结果映射为线索；超出 72 小时窗口或字段缺失则返回 null。 */
-function mapWeiboRow(row: WeiboMblog, code: string, keyword: string, cutoff: number): RawClue | null {
+function mapWeiboRow(row: WeiboMblog, code: string, keyword: string, cutoff: number, kind: "name" | "code" = "name"): RawClue | null {
   const publishedAt = parseWeiboTime(row.created_at);
   const title = cleanText(row.text).slice(0, 240);
   if (!row.id || !title || !publishedAt || publishedAt.valueOf() < cutoff) return null;
+  // 代码形态消歧：以 6 位代码作为关键词搜索时，正文须确实包含该代码，防止搜索索引噪声误配。
+  if (kind === "code" && !row.text.includes(code)) return null;
   return {
     id: `用户讨论-微博-${row.id}`,
     source: "微博讨论",

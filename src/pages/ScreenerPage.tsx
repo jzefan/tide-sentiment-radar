@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowDownUp,
@@ -85,25 +85,63 @@ const signals: Array<{ value: SignalFilter; label: string }> = [
 /** 行情类排序键（历史交易日可用）；其余为舆情类，历史日期无舆情分需回退。 */
 const MARKET_SORT_KEYS: SortBaseKey[] = ["pct", "market", "amount"];
 
+/** 异动候选页的排序/筛选状态持久化：离开页面（看个股详情再返回）后恢复原条件。 */
+const SCREENER_STORAGE_KEY = "tide.screener.state.v1";
+
+interface ScreenerPersistedState {
+  query: string;
+  signal: SignalFilter;
+  sort: SortKey;
+  scope: "movers" | "watchlist";
+  market: string;
+  tags: MoverTag[];
+  date: string;
+  page: number;
+  pageSize: number;
+}
+
+function loadScreenerState(): Partial<ScreenerPersistedState> {
+  try {
+    const raw = sessionStorage.getItem(SCREENER_STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as Partial<ScreenerPersistedState>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveScreenerState(state: ScreenerPersistedState) {
+  try {
+    sessionStorage.setItem(SCREENER_STORAGE_KEY, JSON.stringify(state));
+  } catch {
+    // 隐私模式等场景下忽略持久化失败。
+  }
+}
+
 export function ScreenerPage() {
+  const [initial] = useState<Partial<ScreenerPersistedState>>(loadScreenerState);
   const [payload, setPayload] = useState<StockListResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [query, setQuery] = useState("");
-  const [signal, setSignal] = useState<SignalFilter>("all");
-  const [sort, setSort] = useState<SortKey>("alert");
-  const [scope, setScope] = useState<"movers" | "watchlist">("movers");
-  const [tagFilter, setTagFilter] = useState<MoverTag[]>([]);
-  const [market, setMarket] = useState("all");
-  const [date, setDate] = useState("");
+  const [query, setQuery] = useState(initial.query ?? "");
+  const [signal, setSignal] = useState<SignalFilter>(initial.signal ?? "all");
+  const [sort, setSort] = useState<SortKey>(initial.sort ?? "alert");
+  const [scope, setScope] = useState<"movers" | "watchlist">(initial.scope === "watchlist" ? "watchlist" : "movers");
+  const [tagFilter, setTagFilter] = useState<MoverTag[]>(initial.tags ?? []);
+  const [market, setMarket] = useState(initial.market ?? "all");
+  const [date, setDate] = useState(initial.date ?? "");
   const [tradeDates, setTradeDates] = useState<string[]>([]);
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(50);
+  const [page, setPage] = useState(initial.page ?? 1);
+  const [pageSize, setPageSize] = useState(initial.pageSize ?? 50);
   const watchlist = useWatchlist();
   const latestDate = tradeDates[0] ?? "";
   const isHistorical = Boolean(date) && Boolean(latestDate) && date !== latestDate;
   // 搜索始终在全市场范围内进行；只有“我的自选”且未输入关键词时才收窄到自选股。
   const requestScope: "all" | "watchlist" = scope === "watchlist" && !query ? "watchlist" : "all";
+
+  // 排序/筛选条件变化即持久化，返回本页时恢复。
+  useEffect(() => {
+    saveScreenerState({ query, signal, sort, scope, market, tags: tagFilter, date, page, pageSize });
+  }, [query, signal, sort, scope, market, tagFilter, date, page, pageSize]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -116,9 +154,27 @@ export function ScreenerPage() {
     return () => controller.abort();
   }, []);
 
+  // 交易日列表就绪后自愈：若恢复的日期已不在可用列表中（如曾被清理），自动回到最新交易日，避免 404 空页。
   useEffect(() => {
-    setPage(1);
-  }, [query, signal, sort, scope, market, tagFilter, date]);
+    if (tradeDates.length > 0 && date && date !== tradeDates[0] && !tradeDates.includes(date)) {
+      setDate("");
+    }
+  }, [tradeDates, date]);
+
+  // 筛选/排序条件变化时回到第 1 页；首次挂载（含 StrictMode 双调用）不重置，保留从 sessionStorage 恢复的页码。
+  const prevFilters = useRef({ query, signal, sort, scope, market, tagFilter, date });
+  useEffect(() => {
+    const changed =
+      query !== prevFilters.current.query ||
+      signal !== prevFilters.current.signal ||
+      sort !== prevFilters.current.sort ||
+      scope !== prevFilters.current.scope ||
+      market !== prevFilters.current.market ||
+      tagFilter !== prevFilters.current.tagFilter ||
+      date !== prevFilters.current.date;
+    prevFilters.current = { query, signal, sort, scope, market, tagFilter, date };
+    if (changed) setPage(1);
+  });
   useEffect(() => {
     let controller: AbortController | null = null;
     const load = (silent = false) => {
@@ -144,6 +200,9 @@ export function ScreenerPage() {
         .then((next) => {
           setPayload(next);
           setError("");
+          // 恢复的页码可能超出新数据的总页数（数据量变化），自动收回到最后一页。
+          const nextPages = Math.max(1, Math.ceil(next.total / Math.max(1, next.pageSize)));
+          setPage((current) => (current > nextPages ? nextPages : current));
         })
         .catch((cause) => {
           if (cause instanceof DOMException && cause.name === "AbortError")
@@ -156,6 +215,8 @@ export function ScreenerPage() {
           if (controller === activeController) setLoading(false);
         });
     };
+    // 指定了交易日但列表尚未就绪时先等待：过期日期会被上面的自愈逻辑重置，避免 404 空页闪烁。
+    if (date && tradeDates.length === 0) return;
     const timer = window.setTimeout(() => load(false), query ? 220 : 0);
     const interval = window.setInterval(() => load(true), 60_000);
     return () => {
@@ -163,7 +224,7 @@ export function ScreenerPage() {
       window.clearTimeout(timer);
       window.clearInterval(interval);
     };
-  }, [query, signal, sort, scope, market, tagFilter, date, page, pageSize]);
+  }, [query, signal, sort, scope, market, tagFilter, date, tradeDates, page, pageSize]);
 
   const items = payload?.items ?? [];
   const pages = Math.max(
@@ -216,6 +277,15 @@ export function ScreenerPage() {
     if (next && latestDate && next !== latestDate && !MARKET_SORT_KEYS.includes(sortBase)) {
       setSort("amount");
     }
+  };
+  /** 一键清除全部筛选条件（保留当前 Tab 与排序），供筛选结果为空时快速恢复。 */
+  const clearFilters = () => {
+    setQuery("");
+    setSignal("all");
+    setMarket("all");
+    setTagFilter([]);
+    setDate("");
+    setPage(1);
   };
 
   return (
@@ -447,6 +517,11 @@ export function ScreenerPage() {
                   : "调整关键词或舆情状态后再试。"}
               </p>
             </div>
+            {(query || signal !== "all" || market !== "all" || tagFilter.length > 0 || date) && (
+              <Button type="button" variant="outline" size="sm" onClick={clearFilters}>
+                清除筛选条件
+              </Button>
+            )}
           </div>
         ) : (
           <Card className="overflow-hidden py-0">
@@ -906,14 +981,21 @@ function CandidateRow({
         {stock.mentionCount}
       </TableCell>
       <TableCell className="px-1 py-2 text-center">
-        <strong
-          className={cn(
-            "font-semibold tabular",
-            stock.pctChange >= 0 ? "text-up" : "text-down",
+        <div className="flex flex-col items-center gap-0.5">
+          <strong
+            className={cn(
+              "font-semibold tabular",
+              stock.pctChange >= 0 ? "text-up" : "text-down",
+            )}
+          >
+            {changeLabel(stock.pctChange)}
+          </strong>
+          {stock.changeRank != null && (
+            <span className="text-[10px] leading-none text-muted-foreground tabular">
+              {stock.pctChange >= 0 ? "涨幅" : "跌幅"}第{stock.changeRank}
+            </span>
           )}
-        >
-          {changeLabel(stock.pctChange)}
-        </strong>
+        </div>
       </TableCell>
       <TableCell className="w-[84px] px-1 py-2 text-center">
         <AmountCell stock={stock} />

@@ -217,8 +217,8 @@ export function KlineChart({
   if (points.length < 2) return null;
   const width = 900;
   const height = 380;
-  const padX = 10;
-  /** 右侧价格刻度留白，避免数值被裁切。 */
+  /** 左右两侧均预留价格刻度空间，保证纵坐标对称可读。 */
+  const padX = 54;
   const padRight = 58;
   const padY = 18;
   const volHeight = 58;
@@ -228,13 +228,19 @@ export function KlineChart({
   const chartHeight = height - volHeight - gap - padY;
   const lows = points.map((point) => point.low);
   const highs = points.map((point) => point.high);
-  const min = Math.min(...lows);
-  const max = Math.max(...highs);
+  const dayMin = Math.min(...lows);
+  const dayMax = Math.max(...highs);
+  /** 分时线以昨收为中轴（涨在上、跌在下），蜡烛图使用实际高低区间。 */
+  const centered = variant === "line" && previousClose !== null && previousClose !== undefined;
+  const center = centered ? previousClose! : (dayMin + dayMax) / 2;
+  const maxDeviation = Math.max(dayMax - center, center - dayMin);
+  const min = centered ? center - maxDeviation * 1.12 : dayMin;
+  const max = centered ? center + maxDeviation * 1.12 : dayMax;
   const range = max - min || 1;
   const maxVolume = Math.max(1, ...points.map((point) => point.volume ?? 0));
   const step = plotWidth / points.length;
-  /** 分时横轴拼接上午（09:00–11:30）与下午（13:00–15:00），午休时段不在坐标轴上。 */
-  const MORNING_START = 9 * 60;
+  /** 分时横轴拼接上午（09:30–11:30）与下午（13:00–15:00），左缘对齐 09:30 开盘，午休时段不在坐标轴上。 */
+  const MORNING_START = 9 * 60 + 30;
   const MORNING_END = 11 * 60 + 30;
   const AFTERNOON_START = 13 * 60;
   const CLOSE = 15 * 60;
@@ -255,6 +261,8 @@ export function KlineChart({
   const y = (value: number) => padY + (1 - (value - min) / range) * chartHeight;
   const priceAt = (svgY: number) => min + (1 - Math.min(1, Math.max(0, (svgY - padY) / chartHeight))) * range;
   const volY = (volume: number) => height - (volume / maxVolume) * volHeight;
+  /** 昨收中轴在 SVG 中的 y 坐标（分时线）。 */
+  const centerY = centered ? y(center) : padY + chartHeight / 2;
   const bodyWidth = Math.max(1.5, Math.min(9, step * 0.62));
   const linePath = points.map((point, index) => {
     const x = xFor(index, point.time);
@@ -270,7 +278,7 @@ export function KlineChart({
   const labelIndexes = [0, Math.floor(points.length / 2), points.length - 1];
   /** 分时刻度：上午 09:30/10:30/11:30，下午 13:00/14:00/15:00，午休拼接点用竖虚线分隔。 */
   const timelineTicks: Array<{ label: string; x: number; anchor: "start" | "middle" | "end" }> = [
-    { label: "09:30", x: timeX("09:30"), anchor: "middle" },
+    { label: "09:30", x: timeX("09:30"), anchor: "start" },
     { label: "10:30", x: timeX("10:30"), anchor: "middle" },
     { label: "11:30", x: timeX("11:30"), anchor: "end" },
     { label: "13:00", x: timeX("13:00"), anchor: "start" },
@@ -281,14 +289,21 @@ export function KlineChart({
   const hoveredPoint = hover ? points[hover.index] : null;
   const hoverX = hover && hoveredPoint ? xFor(hover.index, hoveredPoint.time) : 0;
   const hoverPrice = hover ? priceAt(hover.y) : 0;
-  /** 分时涨幅相对昨收计算；蜡烛图相对开盘价计算。 */
-  const hoverChange = hoveredPoint
-    ? variant === "line" && previousClose
-      ? ((hoveredPoint.close - previousClose) / previousClose) * 100
-      : hoveredPoint.open
-        ? ((hoveredPoint.close - hoveredPoint.open) / hoveredPoint.open) * 100
-        : 0
-    : 0;
+  /** 分时涨幅相对昨收计算；蜡烛图相对前一根收盘价计算（标准每日涨幅）。 */
+  const changeBase = (index: number) =>
+    variant === "line" ? previousClose : index > 0 ? points[index - 1].close : previousClose;
+  const changePercent = (point: KlinePoint, index: number) => {
+    const base = changeBase(index);
+    return base ? ((point.close - base) / base) * 100 : 0;
+  };
+  const hoverChange = hover && hoveredPoint ? changePercent(hoveredPoint, hover.index) : 0;
+  /** 蜡烛图相对前收盘的涨跌金额（用于提示框）。 */
+  const hoverDelta = hover && hoveredPoint
+    ? (() => {
+        const base = changeBase(hover.index);
+        return base ? hoveredPoint.close - base : null;
+      })()
+    : null;
 
   const handleMove = (event: React.MouseEvent<SVGSVGElement>) => {
     const rect = event.currentTarget.getBoundingClientRect();
@@ -318,7 +333,7 @@ export function KlineChart({
       <div className="mb-2 flex flex-wrap items-center gap-4 text-xs text-muted-foreground">
         <span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-up" />涨</span>
         <span className="flex items-center gap-1.5"><i className="size-2 rounded-full bg-down" />跌</span>
-        <span className="ml-auto font-mono text-[11px] tabular">高 {max.toFixed(2)} · 低 {min.toFixed(2)}</span>
+        <span className="ml-auto font-mono text-[11px] tabular">高 {dayMax.toFixed(2)} · 低 {dayMin.toFixed(2)}</span>
       </div>
       {hover && hoveredPoint && (
         <div className="pointer-events-none absolute right-1 top-8 z-10 min-w-[172px] rounded-md border bg-card/95 px-3 py-2 text-xs shadow-sm backdrop-blur">
@@ -342,6 +357,20 @@ export function KlineChart({
                 <HoverRow label="高" value={hoveredPoint.high.toFixed(2)} />
                 <HoverRow label="低" value={hoveredPoint.low.toFixed(2)} />
                 <HoverRow label="收" value={hoveredPoint.close.toFixed(2)} tone={hoverChange >= 0 ? "text-up" : "text-down"} />
+                {hoverDelta !== null && (
+                  <HoverRow
+                    label="涨幅"
+                    value={`${hoverChange >= 0 ? "+" : ""}${hoverChange.toFixed(2)}%`}
+                    tone={hoverChange >= 0 ? "text-up" : "text-down"}
+                  />
+                )}
+                {hoverDelta !== null && (
+                  <HoverRow
+                    label="涨跌"
+                    value={`${hoverDelta >= 0 ? "+" : ""}${hoverDelta.toFixed(2)}`}
+                    tone={hoverChange >= 0 ? "text-up" : "text-down"}
+                  />
+                )}
               </>
             )}
             {hoveredPoint.volume !== null && <HoverRow label="量" value={formatKlineVolume(hoveredPoint.volume)} />}
@@ -363,19 +392,55 @@ export function KlineChart({
             <stop offset="0" stopColor="var(--up)" stopOpacity="0.12" />
             <stop offset="1" stopColor="var(--up)" stopOpacity="0" />
           </linearGradient>
+          {centered && (
+            <>
+              <linearGradient id="klineUpFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stopColor="var(--up)" stopOpacity="0.16" />
+                <stop offset="1" stopColor="var(--up)" stopOpacity="0" />
+              </linearGradient>
+              <linearGradient id="klineDownFill" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0" stopColor="var(--down)" stopOpacity="0" />
+                <stop offset="1" stopColor="var(--down)" stopOpacity="0.16" />
+              </linearGradient>
+              <clipPath id="klineUpClip">
+                <rect x={padX} y={padY} width={plotWidth} height={Math.max(0, centerY - padY)} />
+              </clipPath>
+              <clipPath id="klineDownClip">
+                <rect x={padX} y={centerY} width={plotWidth} height={Math.max(0, padY + chartHeight - centerY)} />
+              </clipPath>
+            </>
+          )}
         </defs>
         {gridLevels.map((level) => (
           <g key={level}>
             <line x1={padX} x2={plotRight} y1={y(level)} y2={y(level)} className="stroke-border" strokeDasharray="3 5" />
+            <text x={padX - 6} y={y(level) + 3} textAnchor="end" className="fill-muted-foreground text-[10px] font-mono">{level.toFixed(2)}</text>
             <text x={width - 8} y={y(level) + 3} textAnchor="end" className="fill-muted-foreground text-[10px] font-mono">{level.toFixed(2)}</text>
           </g>
         ))}
+        <text x={padX - 6} y={padY + 3} textAnchor="end" className="fill-muted-foreground text-[10px] font-mono">{max.toFixed(2)}</text>
         <text x={width - 8} y={padY + 3} textAnchor="end" className="fill-muted-foreground text-[10px] font-mono">{max.toFixed(2)}</text>
+        <text x={padX - 6} y={padY + chartHeight + 3} textAnchor="end" className="fill-muted-foreground text-[10px] font-mono">{min.toFixed(2)}</text>
+        <text x={width - 8} y={padY + chartHeight + 3} textAnchor="end" className="fill-muted-foreground text-[10px] font-mono">{min.toFixed(2)}</text>
         {variant === "line" ? (
           <>
-            <path d={areaPath} fill="url(#klineArea)" />
+            {centered ? (
+              <>
+                <path d={areaPath} fill="url(#klineUpFill)" clipPath="url(#klineUpClip)" />
+                <path d={areaPath} fill="url(#klineDownFill)" clipPath="url(#klineDownClip)" />
+              </>
+            ) : (
+              <path d={areaPath} fill="url(#klineArea)" />
+            )}
             <path d={linePath} fill="none" strokeWidth="1.6" className="stroke-up" />
             {avgPath && <path d={`M${avgPath}`} fill="none" strokeWidth="1.2" strokeDasharray="5 4" className="stroke-warning" />}
+            {/* 昨收中轴：涨在上、跌在下 */}
+            {centered && (
+              <g>
+                <line x1={padX} x2={plotRight} y1={centerY} y2={centerY} className="stroke-foreground/35" strokeDasharray="5 4" />
+                <text x={plotRight - 2} y={centerY - 5} textAnchor="end" className="fill-muted-foreground text-[9px]">昨收</text>
+              </g>
+            )}
             {/* 午休拼接分隔线 */}
             <line x1={timeX("11:30")} x2={timeX("11:30")} y1={padY} y2={height - volHeight - gap} className="stroke-border" strokeDasharray="2 4" />
             {timelineTicks.map((tick) => (

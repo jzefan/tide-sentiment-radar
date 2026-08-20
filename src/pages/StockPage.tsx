@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ArrowLeft, ArrowUpRight, CheckCircle2, CircleAlert, Database, Info, Layers3, Star } from "lucide-react";
 import { Link, useParams } from "react-router-dom";
-import { FactorBars, KlineChart, PriceSentimentChart, ToneBadge } from "../components/Visuals";
+import { FactorBars, KlineChart, ToneBadge } from "../components/Visuals";
 import { LoadingState } from "@/components/LoadingState";
 import type { ClueCategory, KlinePeriod, KlineResponse, SentimentEvent, StockDetailResponse } from "../domain/types";
 import { ApiError, api } from "../lib/api";
@@ -53,9 +53,8 @@ export function StockPage() {
     return () => { controller?.abort(); window.clearInterval(interval); };
   }, [code, reloadKey]);
 
-  // 日线复用详情接口的价格历史（含舆情叠加）；分时/周/月独立请求 K 线。
+  // 分时/日/周/月统一请求 K 线（日线用标准蜡烛图展示 OHLC）。
   useEffect(() => {
-    if (klinePeriod === "daily") return;
     setKlineData(null);
     setKlineError("");
     let controller: AbortController | null = null;
@@ -161,44 +160,18 @@ export function StockPage() {
           </Tabs>
         </CardHeader>
         <CardContent className="px-4 pb-5 sm:px-6">
-          {klinePeriod === "daily" ? (
-            <>
-              {data.historyState === "stale" && stock.priceHistory.length >= 2 && (
-                <div className="mb-3 flex items-center gap-2 rounded-md border border-warning/40 bg-warning-soft px-3 py-2 text-xs" role="status"><CircleAlert size={14} className="text-warning" /><span>历史日线更新失败，图表为本地缓存，不代表最新交易日。</span></div>
-              )}
-              {stock.priceHistory.length >= 2 ? (
-                <>
-                  <PriceSentimentChart prices={stock.priceHistory} sentiments={stock.sentimentTrend} events={events} />
-                  {events.length > 0 && (
-                    <div className="mt-4 grid grid-cols-1 divide-y rounded-md border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
-                      {events.slice(0, 3).map((event, index) => (
-                        <div key={event.id} className="flex items-start gap-3 px-4 py-3">
-                          <span className="grid size-5 shrink-0 place-items-center rounded-full bg-warning text-[10px] font-bold text-card">{index + 1}</span>
-                          <div className="min-w-0"><p className="truncate text-xs">{event.title}</p><time className="text-[10px] text-muted-foreground">{formatDateTime(event.publishedAt)}</time></div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </>
-              ) : (
-                <div className="flex flex-col items-center gap-3 py-14 text-center">
-                  <Database size={22} className="text-muted-foreground" />
-                  <div><h3 className="text-sm font-medium">历史价格暂不可用</h3><p className="mt-1 text-xs text-muted-foreground">{data.historyState === "stale" ? "东方财富暂时无法更新，当前没有足够的历史缓存。" : "东方财富历史日线连接失败，本地尚无足够的真实缓存。系统不会生成模拟曲线。"}</p></div>
-                  <Button asChild variant="ghost" size="sm"><Link to="/sources">查看数据状态</Link></Button>
-                </div>
-              )}
-            </>
-          ) : klineError && !klineData ? (
+          {klineError && !klineData ? (
             <div className="flex flex-col items-center gap-3 py-14 text-center">
               <CircleAlert size={22} className="text-warning" />
-              <div><h3 className="text-sm font-medium">{klinePeriod === "minute" ? "分时" : klinePeriod === "weekly" ? "周线" : "月线"}暂不可用</h3><p className="mt-1 text-xs text-muted-foreground">{klineError}。系统不会生成模拟曲线。</p></div>
+              <div><h3 className="text-sm font-medium">{klinePeriod === "minute" ? "分时" : klinePeriod === "daily" ? "日线" : klinePeriod === "weekly" ? "周线" : "月线"}暂不可用</h3><p className="mt-1 text-xs text-muted-foreground">{klineError}。系统不会生成模拟曲线。</p></div>
             </div>
           ) : !klineData || klineData.period !== klinePeriod ? (
             <Skeleton className="h-[320px] w-full" role="status" aria-label="正在加载K线" />
           ) : klineData.items.length < 2 ? (
             <div className="flex flex-col items-center gap-3 py-14 text-center">
               <Database size={22} className="text-muted-foreground" />
-              <div><h3 className="text-sm font-medium">暂无{klinePeriod === "minute" ? "分时" : klinePeriod === "weekly" ? "周线" : "月线"}数据</h3><p className="mt-1 text-xs text-muted-foreground">该周期下当前没有足够的真实行情数据。</p></div>
+              <div><h3 className="text-sm font-medium">{klinePeriod === "daily" ? "历史价格暂不可用" : `暂无${klinePeriod === "minute" ? "分时" : klinePeriod === "weekly" ? "周线" : "月线"}数据`}</h3><p className="mt-1 text-xs text-muted-foreground">{klinePeriod === "daily" ? "东方财富历史日线连接失败，本地尚无足够的真实缓存。系统不会生成模拟曲线。" : "该周期下当前没有足够的真实行情数据。"}</p></div>
+              <Button asChild variant="ghost" size="sm"><Link to="/sources">查看数据状态</Link></Button>
             </div>
           ) : (
             <>
@@ -208,6 +181,16 @@ export function StockPage() {
                 {klinePeriod === "minute" && klineData.items.length > 0 ? ` · 分时截至 ${klineData.items.at(-1)!.time}（午休或收盘后自然静止）` : ""}
                 {" "}· 每 {klinePeriod === "minute" ? "15" : "60"} 秒自动更新
               </p>
+              {klinePeriod === "daily" && events.length > 0 && (
+                <div className="mt-4 grid grid-cols-1 divide-y rounded-md border sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+                  {events.slice(0, 3).map((event, index) => (
+                    <div key={event.id} className="flex items-start gap-3 px-4 py-3">
+                      <span className="grid size-5 shrink-0 place-items-center rounded-full bg-warning text-[10px] font-bold text-card">{index + 1}</span>
+                      <div className="min-w-0"><p className="truncate text-xs">{event.title}</p><time className="text-[10px] text-muted-foreground">{formatDateTime(event.publishedAt)}</time></div>
+                    </div>
+                  ))}
+                </div>
+              )}
             </>
           )}
         </CardContent>

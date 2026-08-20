@@ -585,6 +585,12 @@ async function fetchSnapshotFrom(
   if (unique.size < Math.floor(first.total * 0.9)) {
     throw new Error(`东方财富完整行情缺页：预期 ${first.total}，实际 ${unique.size}`);
   }
+  // 占位行情拒绝：主接口不可达时延迟接口在盘前会把价格字段返回为 "-"，
+  // 此时整批拒绝并回退到本地保存的最后有效快照，避免全市场异动被清空。
+  const validPriceCount = [...unique.values()].filter((quote) => quote.price !== null).length;
+  if (validPriceCount < MINIMUM_A_SHARE_COUNT) {
+    throw new Error(`东方财富行情价格字段异常：仅 ${validPriceCount} 只股票有有效价格（主接口可能不可达，延迟接口返回占位值）`);
+  }
 
   const quoteAt = mostRecentIso([...unique.values()].map((quote) => quote.quoteAt), fetchedAt);
   const tradeDate = shanghaiDate(quoteAt);

@@ -8,9 +8,11 @@ import { fetchEastMoneyDailyBars, fetchEastMoneyPeriodBars, fetchEastMoneyTrends
 import { loadXueqiuCookie } from "./xueqiuSession.ts";
 import { importXueqiuCookieVerified, launchXueqiuBrowserLogin, verifyAndSaveXueqiuCookie } from "./xueqiuBrowser.ts";
 import { pinyin } from "pinyin-pro";
-import { buildDashboard, buildHistoricalStocks, buildRadarSnapshot, stockEvents } from "./radarEngine.ts";
+import { buildDashboard, buildHistoricalStocks, buildRadarSnapshot, startScheduledRefresh, stockEvents } from "./radarEngine.ts";
 
 loadXueqiuCookie();
+// 后台定时抓取：行情、线索与舆情快照按周期落库，接口只读缓存快照，操作（排序/筛选/分页）不再触发远端抓取。
+startScheduledRefresh();
 const port = Number(process.env.API_PORT || 8787);
 // 绑定 0.0.0.0 以便从外部（浏览器）访问；如只需本机访问，可设 API_HOST=127.0.0.1
 const host = process.env.API_HOST || "0.0.0.0";
@@ -263,7 +265,7 @@ async function systemStatus(force: boolean) {
     marketStore: {
       connected: Boolean(snapshot), provider: snapshot ? `东方财富${snapshot.marketSourceTier === "primary" ? "实时接口" : "延迟接口"}` : "东方财富",
       tradeDate: snapshot?.tradeDate ?? null, rows: snapshot?.stocks.length ?? 0,
-      detail: snapshot ? `${snapshot.marketStale ? "正在使用上一批完整真实行情" : "完整行情已通过校验并写入本地数据库"}，交易日 ${snapshot.tradeDate}` : "东方财富行情首次同步尚未完成",
+      detail: snapshot ? `${snapshot.marketStale ? "正在使用上一批完整真实行情" : "完整行情已通过校验并写入本地数据库"}，交易日 ${snapshot.tradeDate}${snapshot.marketStale ? marketSyncReason() : ""}` : "东方财富行情首次同步尚未完成",
     },
     universe: { total: snapshot?.stocks.length ?? 0, analyzed: snapshot?.stocks.filter((stock) => stock.analysisStatus === "scored").length ?? 0, provider: "东方财富沪深北股票池" },
     clues: { total: getClueCount(), lastSuccessAt: lastSync },
@@ -276,6 +278,15 @@ async function systemStatus(force: boolean) {
       ...(snapshot?.forumEnabled ? [{ id: "licensed-forum", name: snapshot.forumSource, description: "按书面许可协议获取的论坛线索，不保存用户身份", kind: "forum" as const, state: snapshot.clueFailures.includes("授权论坛源") ? "degraded" as const : "connected" as const, lastSync: lastSync ?? "连接失败", records: `${snapshot.events.filter((event) => event.sourceKind === "forum").length} 条当前线索`, licenseId: snapshot.forumLicenseId ?? undefined, termsUrl: snapshot.forumTermsUrl ?? undefined }] : []),
     ],
   };
+}
+
+/** 行情同步失败原因（精简展示，避免把完整 AggregateError 堆栈糊到页面上）。 */
+function marketSyncReason(): string {
+  const state = getProviderState("eastmoney_market");
+  const raw = state?.error ?? "";
+  if (!raw) return "";
+  const cleaned = raw.replace(/\s+/g, " ").slice(0, 160);
+  return `；行情同步失败：${cleaned}`;
 }
 
 export interface KlinePoint {

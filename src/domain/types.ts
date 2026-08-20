@@ -88,6 +88,8 @@ export interface StockSnapshot {
   isWatchlisted?: boolean;
   /** 异动标签：涨幅大（涨幅前100）/ 跌幅大（跌幅前50）与 成交额大（成交额前150）。 */
   moverTags?: MoverTag[];
+  /** 涨跌幅榜名次（1-based）：pctChange>0 为涨幅榜名次，pctChange<0 为跌幅榜名次，未入选为 null。 */
+  changeRank?: number | null;
 }
 
 export interface RelatedStock {

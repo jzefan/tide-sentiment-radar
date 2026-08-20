@@ -1,4 +1,5 @@
 import type { EventType, SentimentTone } from "../src/domain/types.ts";
+import { FIN_NEGATIVE, FIN_POSITIVE } from "./finLexicon.ts";
 
 /**
  * 可解释中文情绪分类。
@@ -171,6 +172,9 @@ function lexiconHits(text: string): Hit[] {
   collect(STRONG_NEGATIVE, -1, 2.5);
   collect(SARCASM, -1, 1.5);
   collect(WEAK_NEGATIVE, -1, 0.5);
+  // 姚加权金融社媒词典：半权重补充命中，不覆盖内置精编词表的判定（同位置重复命中由 dedupeHits 去重）。
+  collect(FIN_POSITIVE, 1, 0.5);
+  collect(FIN_NEGATIVE, -1, 0.5);
   return hits;
 }
 
