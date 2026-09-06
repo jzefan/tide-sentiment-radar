@@ -91,12 +91,12 @@ export function RadarPage() {
         ))}
       </section>
 
-      <div className="grid gap-4 lg:grid-cols-[0.9fr_1.1fr]">
+      <div className="grid gap-4 xl:grid-cols-[0.9fr_1.1fr]">
         <Card>
           <CardContent className="px-6 py-6">
-            <div className="flex items-center gap-6">
+            <div className="flex flex-col items-center gap-6 sm:flex-row sm:items-center">
               <ScoreDial score={data.moodIndex} />
-              <div className="min-w-0">
+              <div className="w-full min-w-0 sm:w-auto">
                 <p className="text-xs text-muted-foreground">股票覆盖率 <strong className="tabular text-foreground">{data.breadth}%</strong></p>
                 <p className="mt-3 text-sm leading-relaxed text-muted-foreground">{data.dataMessage}。情绪指数只描述当前已关联线索，不代表全市场未来方向。</p>
                 <dl className="mt-5 grid grid-cols-3 gap-4 border-t pt-4">
@@ -149,6 +149,58 @@ export function RadarPage() {
           ) : <p className="px-4 py-6 text-sm text-muted-foreground">当前线索尚未形成稳定主题。</p>}
         </CardContent>
       </Card>
+
+      {data.hotIndustries?.length ? (
+        <Card>
+          <CardHeader className="grid-cols-[1fr_auto] grid-rows-1 items-center justify-between">
+            <div>
+              <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">行业信息分类</p>
+              <CardTitle className="mt-1 text-lg">当前热点行业</CardTitle>
+            </div>
+            <p className="hidden text-xs text-muted-foreground sm:block">舆情热度与行情强度分开计算，再展示两者关系。</p>
+          </CardHeader>
+          <CardContent className="px-4 pb-5 sm:px-6">
+            <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+              {data.hotIndustries.slice(0, 8).map((industry) => {
+                const relationTone = industry.relation === "舆情交易双热" ? "border-up/30 bg-up-soft" : industry.relation === "舆情升温、价格未确认" ? "border-warning/30 bg-warning-soft" : industry.relation === "交易驱动" ? "border-primary/20 bg-accent" : "border-border bg-card";
+                return (
+                  <Link
+                    key={industry.profile.code}
+                    to={`/screener?industry=${encodeURIComponent(industry.profile.code)}`}
+                    className={cn("rounded-lg border p-4 transition-colors hover:border-primary/40 hover:bg-accent/60", relationTone)}
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold">{industry.profile.name}</p>
+                        <p className="mt-1 text-[11px] text-muted-foreground">{industry.stage} · {industry.driver}</p>
+                      </div>
+                      <span className="shrink-0 rounded-full border bg-background/70 px-2 py-0.5 text-[11px] text-muted-foreground">{industry.relation}</span>
+                    </div>
+                    <div className="mt-4 grid grid-cols-2 gap-3">
+                      <div>
+                        <p className="text-[11px] text-muted-foreground">舆情热度</p>
+                        <p className="mt-1 text-xl font-semibold tabular">{industry.textHeat}</p>
+                        <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-background/80"><i className="block h-full rounded-full bg-primary" style={{ width: `${industry.textHeat}%` }} /></div>
+                      </div>
+                      <div>
+                        <p className="text-[11px] text-muted-foreground">行情强度</p>
+                        <p className={cn("mt-1 text-xl font-semibold tabular", industry.marketStrength >= 60 ? "text-up" : industry.marketStrength <= 40 ? "text-down" : "text-foreground")}>{industry.marketStrength}</p>
+                        <p className={cn("mt-1 text-[11px] tabular", industry.industryReturn >= 0 ? "text-up" : "text-down")}>{changeLabel(industry.industryReturn)} · 超额 {changeLabel(industry.marketExcess)}</p>
+                      </div>
+                    </div>
+                    <div className="mt-3 flex items-center justify-between border-t border-current/10 pt-3 text-[11px] text-muted-foreground">
+                      <span>{industry.independentEvents} 个独立事件 · {industry.stockCoverage} 只股票</span>
+                      <ArrowUpRight size={13} aria-hidden="true" />
+                    </div>
+                    {industry.informationCategories.length ? <p className="mt-2 truncate text-[11px] text-muted-foreground">信息分类：{industry.informationCategories.join(" · ")}</p> : null}
+                  </Link>
+                );
+              })}
+            </div>
+            <p className="mt-4 text-xs leading-relaxed text-muted-foreground">行业热度只使用新闻、公告和用户讨论等文本线索；行情强度来自行业成分股相对全市场的当日表现。两者同向时标记“舆情交易双热”，这是当前交易日的同期描述，不是历史后验或未来收益预测；历史关系需完成未来5个交易日的样本观察。</p>
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader className="grid-cols-[1fr_auto] grid-rows-1 items-center justify-between">

@@ -1,8 +1,8 @@
 import { useEffect, useRef, useState } from "react";
-import { ArrowUpRight, CheckCircle2, CircleAlert, Database, RefreshCw, ShieldCheck, Unplug } from "lucide-react";
+import { ArrowUpRight, CheckCircle2, ChevronLeft, ChevronRight, CircleAlert, Database, RefreshCw, ShieldCheck, Unplug } from "lucide-react";
 import type { DataSourceStatus, SystemStatus } from "../domain/types";
 import { scoreFormula } from "../domain/scoring";
-import { api } from "../lib/api";
+import { api, type DiscussionSourceId, type SourceDiscussionsResponse } from "../lib/api";
 import { formatDateTime, formatNumber } from "../lib/format";
 import { Button } from "@/components/ui/button";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
@@ -11,6 +11,13 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Skeleton } from "@/components/ui/skeleton";
 import { LoadingState } from "@/components/LoadingState";
 import { cn } from "@/lib/utils";
+import { Sheet, SheetContent, SheetDescription, SheetFooter, SheetHeader, SheetTitle } from "@/components/ui/sheet";
+
+const discussionSourceIds = new Set<DiscussionSourceId>(["eastmoney-guba", "eastmoney-guba-replies", "weibo"]);
+
+function asDiscussionSourceId(value: string): DiscussionSourceId | null {
+  return discussionSourceIds.has(value as DiscussionSourceId) ? value as DiscussionSourceId : null;
+}
 
 const stateCopy = {
   connected: { label: "已连接", icon: CheckCircle2, className: "text-down" },
@@ -24,6 +31,8 @@ export function SourcesPage() {
   const [refreshing, setRefreshing] = useState(false);
   const [checkedAt, setCheckedAt] = useState("");
   const [xueqiuDialogOpen, setXueqiuDialogOpen] = useState(false);
+  const [discussionDrawerOpen, setDiscussionDrawerOpen] = useState(false);
+  const [discussionSource, setDiscussionSource] = useState<{ id: DiscussionSourceId; name: string } | null>(null);
   /** 地址栏导入代码需要直达后端端口：dev 为 8787，生产同端口。 */
   const apiPort = import.meta.env.DEV ? "8787" : window.location.port || "8787";
   const requestController = useRef<AbortController | null>(null);
@@ -127,7 +136,17 @@ export function SourcesPage() {
         <CardContent className="px-0 pb-0" aria-busy={!system} aria-label={!system ? "正在加载数据源状态" : "数据源状态列表"}>
           {system ? (
             <div className="divide-y border-t">
-              {system.sources.map((source) => <SourceRow source={source} key={source.id} onOpenXueqiu={() => setXueqiuDialogOpen(true)} />)}
+              {system.sources.map((source) => <SourceRow
+                source={source}
+                key={source.id}
+                onOpenXueqiu={() => setXueqiuDialogOpen(true)}
+                onOpenDiscussion={(nextSource) => {
+                  const id = asDiscussionSourceId(nextSource.id);
+                  if (!id) return;
+                  setDiscussionSource({ id, name: nextSource.name });
+                  setDiscussionDrawerOpen(true);
+                }}
+              />)}
             </div>
           ) : (
             <div className="flex flex-col items-center gap-5 py-10">
@@ -176,8 +195,8 @@ export function SourcesPage() {
               ))}
             </div>
             <div className="mt-6 border-t pt-4">
-              <span className="text-xs font-medium text-up">方向分</span>
-              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">以 50 为中性，结合情绪、共识、来源质量、实时涨跌确认与信息时效计算。暂无线索时显示空值。</p>
+              <span className="text-xs font-medium text-up">价情共振分</span>
+              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">以 50 为中性，结合文本情绪、共识、来源质量、实时涨跌确认与信息时效计算。文本方向分与行情确认分开展示。</p>
             </div>
           </CardContent>
         </Card>
@@ -194,14 +213,30 @@ export function SourcesPage() {
         onOpenChange={setXueqiuDialogOpen}
         onConnected={() => void load(true)}
       />
+      <DiscussionDrawer
+        open={discussionDrawerOpen}
+        source={discussionSource}
+        onOpenChange={setDiscussionDrawerOpen}
+      />
     </div>
   );
 }
 
-function SourceRow({ source, onOpenXueqiu }: { source: DataSourceStatus; onOpenXueqiu?: () => void }) {
+function SourceRow({ source, onOpenXueqiu, onOpenDiscussion }: { source: DataSourceStatus; onOpenXueqiu?: () => void; onOpenDiscussion?: (source: DataSourceStatus) => void }) {
   const copy = stateCopy[source.state];
   const Icon = copy.icon;
   const link = source.termsUrl ?? source.repository;
+  const canOpenDiscussion = Boolean(asDiscussionSourceId(source.id));
+  const discussionButton = canOpenDiscussion ? (
+    <button
+      type="button"
+      className="text-left text-xs tabular underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={() => onOpenDiscussion?.(source)}
+      aria-label={`查看${source.name}帖子和评论`}
+    >
+      {source.records}
+    </button>
+  ) : <span className="text-xs">{source.records}</span>;
   return (
     <article className="grid min-h-[80px] grid-cols-[88px_1fr_auto] items-center gap-4 px-6 py-3.5 sm:grid-cols-[96px_minmax(0,1fr)_auto_36px]">
       <span className={cn("inline-flex w-max items-center gap-1.5 text-xs", copy.className)}><Icon size={14} />{copy.label}</span>
@@ -212,7 +247,7 @@ function SourceRow({ source, onOpenXueqiu }: { source: DataSourceStatus; onOpenX
       </div>
       <dl className="hidden min-w-[240px] grid-cols-2 sm:grid">
         <div><dt className="text-[11px] text-muted-foreground">最后同步</dt><dd className="mt-0.5 text-xs">{String(source.lastSync ?? "").includes("T") ? formatDateTime(source.lastSync) : source.lastSync}</dd></div>
-        <div><dt className="text-[11px] text-muted-foreground">数据量</dt><dd className="mt-0.5 text-xs">{source.records}</dd></div>
+        <div><dt className="text-[11px] text-muted-foreground">数据量</dt><dd className="mt-0.5">{discussionButton}</dd></div>
       </dl>
       {source.id === "xueqiu" ? (
         <Button
@@ -230,9 +265,106 @@ function SourceRow({ source, onOpenXueqiu }: { source: DataSourceStatus; onOpenX
       ) : <span className="hidden size-9 sm:block" />}
       <dl className="col-span-2 grid grid-cols-2 gap-4 border-t pt-2 sm:hidden">
         <div><dt className="text-[11px] text-muted-foreground">最后同步</dt><dd className="mt-0.5 text-xs">{String(source.lastSync ?? "").includes("T") ? formatDateTime(source.lastSync) : source.lastSync}</dd></div>
-        <div><dt className="text-[11px] text-muted-foreground">数据量</dt><dd className="mt-0.5 text-xs">{source.records}</dd></div>
+        <div><dt className="text-[11px] text-muted-foreground">数据量</dt><dd className="mt-0.5">{discussionButton}</dd></div>
       </dl>
     </article>
+  );
+}
+
+function DiscussionDrawer({
+  open,
+  source,
+  onOpenChange,
+}: {
+  open: boolean;
+  source: { id: DiscussionSourceId; name: string } | null;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const [page, setPage] = useState(1);
+  const [data, setData] = useState<SourceDiscussionsResponse | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const requestController = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    setPage(1);
+    setData(null);
+    setError("");
+  }, [source?.id]);
+
+  useEffect(() => {
+    if (!open || !source) return;
+    requestController.current?.abort();
+    const activeController = new AbortController();
+    requestController.current = activeController;
+    setLoading(true);
+    setError("");
+    void api.sourceDiscussions(source.id, page, activeController.signal)
+      .then((next) => setData(next))
+      .catch((cause) => {
+        if (cause instanceof DOMException && cause.name === "AbortError") return;
+        setError(cause instanceof Error ? cause.message : "无法读取讨论内容");
+      })
+      .finally(() => {
+        if (requestController.current === activeController) setLoading(false);
+      });
+    return () => activeController.abort();
+  }, [open, page, source]);
+
+  const totalPages = data?.totalPages ?? 1;
+
+  return (
+    <Sheet open={open} onOpenChange={onOpenChange}>
+      <SheetContent side="right" className="w-full gap-0 p-0 sm:max-w-xl">
+        <SheetHeader className="border-b px-5 py-5 pr-12">
+          <SheetTitle>{source?.name ?? "用户讨论"}</SheetTitle>
+          <SheetDescription>
+            {data ? `共 ${formatNumber(data.total)} 条，按发布时间倒序展示` : "查看已保存的帖子与评论"}
+          </SheetDescription>
+        </SheetHeader>
+
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4" aria-busy={loading}>
+          {loading && !data ? (
+            <div className="space-y-4">
+              {Array.from({ length: 4 }, (_, index) => <Skeleton className="h-28 w-full" key={index} />)}
+            </div>
+          ) : error ? (
+            <div className="rounded-md border border-warning/40 bg-warning-soft px-4 py-3 text-sm text-warning">{error}</div>
+          ) : data && data.items.length ? (
+            <div className="divide-y">
+              {data.items.map((item) => (
+                <article className="py-4 first:pt-0" key={item.id}>
+                  <div className="flex items-start justify-between gap-3">
+                    <h3 className="min-w-0 text-sm font-medium leading-relaxed">{item.title || "无标题讨论"}</h3>
+                    <time className="shrink-0 text-[11px] text-muted-foreground">{formatDateTime(item.publishedAt)}</time>
+                  </div>
+                  {item.summary && <p className="mt-2 line-clamp-5 whitespace-pre-wrap text-xs leading-relaxed text-muted-foreground">{item.summary}</p>}
+                  <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-[11px] text-muted-foreground">
+                    {item.stockCodes.length > 0 && <span>关联 {item.stockCodes.join("、")}</span>}
+                    {item.interactionCount > 0 && <span>互动 {formatNumber(item.interactionCount)}</span>}
+                    {item.url && <a className="inline-flex items-center gap-1 text-foreground underline-offset-4 hover:underline" href={item.url} target="_blank" rel="noreferrer">查看原文 <ArrowUpRight size={12} /></a>}
+                  </div>
+                </article>
+              ))}
+            </div>
+          ) : (
+            <div className="flex min-h-48 items-center justify-center text-sm text-muted-foreground">当前没有已保存的讨论内容</div>
+          )}
+        </div>
+
+        <SheetFooter className="border-t px-5 py-3 sm:flex-row sm:items-center sm:justify-between">
+          <span className="text-xs text-muted-foreground">第 {page} / {totalPages} 页</span>
+          <div className="flex items-center gap-2">
+            <Button type="button" variant="outline" size="sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => Math.max(1, current - 1))}>
+              <ChevronLeft size={15} />上一页
+            </Button>
+            <Button type="button" variant="outline" size="sm" disabled={page >= totalPages || loading} onClick={() => setPage((current) => current + 1)}>
+              下一页<ChevronRight size={15} />
+            </Button>
+          </div>
+        </SheetFooter>
+      </SheetContent>
+    </Sheet>
   );
 }
 

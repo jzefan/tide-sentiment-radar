@@ -1,4 +1,4 @@
-import type { RawClue } from "./eastMoney.ts";
+import type { LiveClueRangeProof, RawClue } from "./eastMoney.ts";
 
 interface ForumFeedPayload {
   schema_version?: string;
@@ -13,15 +13,21 @@ interface ForumFeedPayload {
     metrics?: { views?: number; replies?: number; likes?: number };
     deleted?: boolean;
   }>;
+  coverage?: {
+    query_from?: string;
+    query_to?: string;
+    cursor_exhausted?: boolean;
+    stock_codes?: string[];
+  };
 }
 
 export function isForumFeedConfigured() {
   return Boolean(process.env.FORUM_FEED_URL);
 }
 
-export async function fetchAuthorizedForumClues(stockCodes: string[]) {
+export async function fetchAuthorizedForumClues(stockCodes: string[], requestedRange?: { queryFrom: string; queryTo: string }) {
   const configuredUrl = process.env.FORUM_FEED_URL;
-  if (!configuredUrl) return { items: [] as RawClue[], sourceName: "论坛舆情 · 待授权接入", licenseId: null, termsUrl: null };
+  if (!configuredUrl) return { items: [] as RawClue[], sourceName: "论坛舆情 · 待授权接入", licenseId: null, termsUrl: null, range: null as LiveClueRangeProof | null };
 
   const url = new URL(configuredUrl);
   const loopback = new Set(["127.0.0.1", "localhost", "[::1]"]);
@@ -30,6 +36,10 @@ export async function fetchAuthorizedForumClues(stockCodes: string[]) {
   }
   url.searchParams.set("stock_codes", stockCodes.join(","));
   url.searchParams.set("limit", "1000");
+  if (requestedRange) {
+    url.searchParams.set("published_from", requestedRange.queryFrom);
+    url.searchParams.set("published_to", requestedRange.queryTo);
+  }
 
   const headers: Record<string, string> = { accept: "application/json" };
   if (process.env.FORUM_FEED_TOKEN) headers.authorization = `Bearer ${process.env.FORUM_FEED_TOKEN}`;
@@ -61,7 +71,16 @@ export async function fetchAuthorizedForumClues(stockCodes: string[]) {
     };
   }).filter((item): item is RawClue => item !== null);
 
-  return { items, sourceName: payload.source.name, licenseId: payload.source.license_id, termsUrl };
+  const sameInstant = (left: unknown, right: string) => typeof left === "string" && Number.isFinite(Date.parse(left)) && Date.parse(left) === Date.parse(right);
+  const coveredCodes = [...new Set((payload.coverage?.stock_codes ?? []).filter((code): code is string => typeof code === "string" && stockCodes.includes(code) && /^\d{6}$/.test(code)))].sort();
+  const range = requestedRange
+    && payload.coverage?.cursor_exhausted === true
+    && sameInstant(payload.coverage.query_from, requestedRange.queryFrom)
+    && sameInstant(payload.coverage.query_to, requestedRange.queryTo)
+    && coveredCodes.length > 0
+    ? { kind: "server-window-paginated" as const, queryFrom: requestedRange.queryFrom, queryTo: requestedRange.queryTo, cursorExhausted: true, coveredCodes }
+    : null;
+  return { items, sourceName: payload.source.name, licenseId: payload.source.license_id, termsUrl, range };
 }
 
 function validPublicUrl(value: unknown) {

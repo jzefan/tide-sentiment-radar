@@ -139,11 +139,48 @@ export function StockPage() {
         <div className="flex items-center gap-6">
           <div className="text-center"><p className="text-xs text-muted-foreground">异动分</p><strong className="mt-1 block text-4xl font-semibold tabular">{stock.alertScore ?? "—"}</strong><em className="mt-1 block text-[11px] not-italic text-muted-foreground">变化强度</em></div>
           <div className="h-16 w-px bg-border" />
-          <div className="text-center"><p className="text-xs text-muted-foreground">方向分</p><strong className={cn("mt-1 block text-4xl font-semibold tabular", (stock.radarScore ?? 50) >= 50 ? "text-up" : "text-down")}>{stock.radarScore ?? "—"}</strong><em className="mt-1 block text-[11px] not-italic text-muted-foreground">{stock.radarScore === null ? "等待有效线索" : "50 为中性"}</em></div>
+          <div className="text-center"><p className="text-xs text-muted-foreground">文本方向</p><strong className={cn("mt-1 block text-4xl font-semibold tabular", (stock.textDirectionScore ?? 50) >= 50 ? "text-up" : "text-down")}>{stock.textDirectionScore ?? "—"}</strong><em className="mt-1 block text-[11px] not-italic text-muted-foreground">{stock.textDirectionScore === null || stock.textDirectionScore === undefined ? "等待有效线索" : "50 为中性"}</em></div>
         </div>
       </header>
 
       {actionError && <div className="flex items-center gap-2 rounded-md border border-warning/40 bg-warning-soft px-4 py-2.5 text-sm" role="alert"><CircleAlert size={16} className="text-warning" /><span>自选股更新失败：{actionError}</span><button type="button" className="ml-auto text-xs underline underline-offset-4" onClick={() => setActionError("")}>关闭提示</button></div>}
+
+      {stock.industry ? (
+        <Card>
+          <CardHeader className="grid-cols-[1fr_auto] grid-rows-1 items-center gap-3">
+            <div>
+              <p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">行业信息分类 · {stock.industry.taxonomy}</p>
+              <CardTitle className="mt-1 text-lg">{stock.industry.name}行业与个股关系</CardTitle>
+            </div>
+            {stock.industryPulse ? <Badge variant="outline" className={cn("border", stock.industryPulse.relation === "舆情交易双热" && "border-up/30 bg-up-soft text-up", stock.industryPulse.relation === "舆情升温、价格未确认" && "border-warning/30 bg-warning-soft text-warning", stock.industryPulse.relation === "交易驱动" && "border-primary/30 bg-accent")}>{stock.industryPulse.relation}</Badge> : <span className="text-xs text-muted-foreground">行业线索积累中</span>}
+          </CardHeader>
+          <CardContent className="px-6 pb-6">
+            {stock.industryPulse && stock.industryAttribution ? (
+              <>
+                <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                  <IndustryMetric label="行业舆情热度" value={stock.industryPulse.textHeat} suffix="" tone="neutral" hint={`${stock.industryPulse.independentEvents} 个独立事件`} />
+                  <IndustryMetric label="行业行情强度" value={stock.industryPulse.marketStrength} suffix="" tone={stock.industryPulse.marketStrength >= 60 ? "positive" : stock.industryPulse.marketStrength <= 40 ? "negative" : "neutral"} hint={`行业 ${changeLabel(stock.industryAttribution.industryReturn)}`} />
+                  <IndustryMetric label="行业同行部分" value={stock.industryAttribution.industryPart} suffix="%" tone={stock.industryAttribution.industryPart >= 0 ? "positive" : "negative"} hint="行业相对全市场" />
+                  <IndustryMetric label="个股相对行业" value={stock.industryAttribution.stockSpecificPart} suffix="%" tone={stock.industryAttribution.stockSpecificPart >= 0 ? "positive" : "negative"} hint="个股涨跌减行业涨跌" />
+                </div>
+                <div className="mt-5 grid gap-4 border-t pt-4 xl:grid-cols-[1fr_auto] xl:items-center">
+                  <div>
+                    <p className="text-sm font-medium">当前判断：{stock.industryPulse.relation}</p>
+                    <p className="mt-1 text-xs leading-relaxed text-muted-foreground">{stock.industryPulse.stage} · {stock.industryPulse.driver}。当前关系是本交易日的同期描述；行业热度只读取文本线索，行情强度只读取成分股表现；“行业同行部分”是已实现的相对表现拆解，不是因果贡献。</p>
+                    {stock.industryPulse.informationCategories.length ? <p className="mt-2 text-xs text-muted-foreground">信息分类：{stock.industryPulse.informationCategories.join(" · ")}</p> : null}
+                  </div>
+                  <div className="rounded-md border bg-muted/30 px-4 py-3 text-xs text-muted-foreground">
+                    <p>历史关系：{stock.industryPulse.historicalRelationship.status}</p>
+                    <p className="mt-1">{stock.industryPulse.historicalRelationship.note}</p>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="flex items-center gap-3 rounded-md border border-dashed px-4 py-5 text-sm text-muted-foreground"><Info size={16} />当前行业暂未积累足够的有效线索，系统不会用涨跌幅反推舆情方向。</div>
+            )}
+          </CardContent>
+        </Card>
+      ) : null}
 
       <Card>
         <CardHeader className="grid-cols-[1fr_auto] grid-rows-1 items-center gap-4">
@@ -200,7 +237,7 @@ export function StockPage() {
         <Card>
           <CardHeader className="grid-cols-[1fr_auto] grid-rows-1 items-center justify-between">
             <div><p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">评分依据</p><CardTitle className="mt-1 text-lg">因子拆解</CardTitle></div>
-            <p className="hidden text-xs text-muted-foreground sm:block">只有存在有效线索时才计算方向分和异动分。</p>
+            <p className="hidden text-xs text-muted-foreground sm:block">文本方向只读取线索；价格确认单独进入价情共振。</p>
           </CardHeader>
           <CardContent className="px-6 pb-6">
             {stock.analysisStatus === "scored" ? <FactorBars factors={stock.factors} /> : (
@@ -227,10 +264,10 @@ export function StockPage() {
       </div>
 
       <Card>
-        <CardHeader className="grid-cols-[1fr_auto] grid-rows-1 items-center gap-4">
-          <CardTitle className="text-lg">全部关联事件</CardTitle>
-          <Tabs value={eventCategory} onValueChange={(value) => setEventCategory(value as typeof eventCategory)} className="min-w-0">
-            <TabsList className="h-8 overflow-x-auto">
+        <CardHeader className="flex flex-col items-start gap-3 sm:grid sm:grid-cols-[1fr_auto] sm:grid-rows-1 sm:items-center sm:gap-4">
+          <CardTitle className="whitespace-nowrap text-lg">全部关联事件</CardTitle>
+          <Tabs value={eventCategory} onValueChange={(value) => setEventCategory(value as typeof eventCategory)} className="w-full min-w-0 sm:w-auto">
+            <TabsList className="h-8 max-w-full overflow-x-auto">
               {(["全部线索", "新闻事件", "公司公告", "用户讨论"] as const).map((category) => {
                 const count = category === "全部线索" ? events.length : events.filter((event) => event.category === category).length;
                 return (
@@ -295,6 +332,16 @@ function SourceMix({ sourceMix }: { sourceMix: Record<string, number> }) {
           </div>
         ))}
       </dl>
+    </div>
+  );
+}
+
+function IndustryMetric({ label, value, suffix, tone, hint }: { label: string; value: number; suffix: string; tone: "positive" | "negative" | "neutral"; hint: string }) {
+  return (
+    <div className="rounded-md border bg-muted/20 px-4 py-3">
+      <p className="text-xs text-muted-foreground">{label}</p>
+      <p className={cn("mt-1 text-xl font-semibold tabular", tone === "positive" ? "text-up" : tone === "negative" ? "text-down" : "text-foreground")}>{value > 0 && suffix === "%" ? "+" : ""}{value}{suffix}</p>
+      <p className="mt-1 text-[11px] text-muted-foreground">{hint}</p>
     </div>
   );
 }

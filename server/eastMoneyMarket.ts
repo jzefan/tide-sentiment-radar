@@ -8,8 +8,12 @@ const TENCENT_MINUTE_BASE = "https://ifzq.gtimg.cn";
 const EASTMONEY_TOKEN = "bd1d9ddb04089700cf9c27f6f7426281";
 const HISTORY_TOKEN = "fa5fd1943c7b386f172d6893dbfba10b";
 const A_SHARE_FILTER = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048";
-const MARKET_FIELDS = "f2,f3,f5,f6,f8,f12,f13,f14,f15,f16,f17,f18,f20,f124";
+// f100 为东方财富行情中的行业名称字段。字段在部分延迟/异常接口中可能缺失，
+// 解析时必须允许为空，不能因为行业字段缺失而丢弃整条行情。
+const MARKET_FIELDS = "f2,f3,f5,f6,f8,f12,f13,f14,f15,f16,f17,f18,f20,f26,f100,f124";
 const MINIMUM_A_SHARE_COUNT = 4_000;
+/** 沪深 A 股市场的合理历史起点；更早的 f26 值按异常数据处理。 */
+const EARLIEST_A_SHARE_LISTING_DATE = "1990-12-01";
 
 export type EastMoneyExchange = "SH" | "SZ" | "BJ";
 export type EastMoneyMarketName = "沪市" | "深市" | "北交所";
@@ -17,6 +21,15 @@ export type EastMoneyEndpointTier = "primary" | "delayed";
 export type EastMoneyAdjustment = "none" | "forward" | "backward";
 /** K 线数据可能来自东方财富原生历史主机，或网络受限时由腾讯行情镜像回填（内容同为交易所公开行情）。 */
 export type EastMoneyKlineProvider = "eastmoney" | "tencent-mirror";
+
+export interface BoardLimitMetadata {
+  limitPercent: 5 | 10 | 20;
+  effectiveFrom: string;
+  effectiveTo: string | null;
+  source: string;
+  sourceVersion: string;
+  sourceUrl: string | null;
+}
 
 export interface EastMoneyMarketQuote {
   code: string;
@@ -33,6 +46,13 @@ export interface EastMoneyMarketQuote {
   amount: number | null;
   turnover: number | null;
   marketCap: number | null;
+  /** 东方财富 f26 上市日期，统一为 YYYY-MM-DD；接口未提供或格式无效时为 null。 */
+  listingDate: string | null;
+  /** 东方财富 f100 行业名称；行情接口未提供时为 null。 */
+  industryName: string | null;
+  /** Source/version/effective-date resolved board limit; null is audited and observable one-price boards remain excluded. */
+  limitPercent?: 5 | 10 | 20 | null;
+  boardLimitMetadata?: BoardLimitMetadata | null;
   quoteAt: string;
   tradeDate: string;
   quoteUrl: string;
@@ -756,6 +776,7 @@ function parseQuote(
   const quoteAt = timestamp && timestamp > 0
     ? new Date(timestamp * 1_000).toISOString()
     : fetchedAt;
+  const boardLimitMetadata = configuredBoardLimitMetadata(code);
   return {
     code,
     name,
@@ -771,12 +792,69 @@ function parseQuote(
     amount: finite(row.f6),
     turnover: finite(row.f8),
     marketCap: finite(row.f20),
+    listingDate: normalizeListingDate(row.f26),
+    industryName: normalizeIndustryField(row.f100),
+    boardLimitMetadata,
+    limitPercent: boardLimitMetadata?.limitPercent ?? null,
     quoteAt,
     tradeDate: shanghaiDate(quoteAt),
     quoteUrl: eastMoneyQuoteUrl(code),
     provider: "eastmoney",
     sourceTier,
   };
+}
+
+/**
+ * EastMoney's list endpoint has no reliable per-security board-limit field.
+ * Deployments may provide an explicitly maintained, auditable code map; absent
+ * a valid entry we persist null and the strategy's documented fallback applies.
+ */
+function configuredBoardLimitMetadata(code: string): BoardLimitMetadata | null {
+  const raw = process.env.TIDE_LIMIT_PERCENT_BY_CODE;
+  if (!raw) return null;
+  try {
+    const value = JSON.parse(raw) as Record<string, unknown>;
+    const entry = value[code];
+    if (!entry || typeof entry !== "object") return null;
+    const record = entry as Record<string, unknown>;
+    const limitPercent = record.limitPercent;
+    const effectiveFrom = typeof record.effectiveFrom === "string" ? record.effectiveFrom : "";
+    const effectiveTo = typeof record.effectiveTo === "string" ? record.effectiveTo : null;
+    const source = typeof record.source === "string" ? record.source.trim() : "";
+    const sourceVersion = typeof record.sourceVersion === "string" ? record.sourceVersion.trim() : "";
+    const sourceUrl = typeof record.sourceUrl === "string" ? record.sourceUrl : null;
+    return (limitPercent === 5 || limitPercent === 10 || limitPercent === 20) && /^\d{4}-\d{2}-\d{2}$/.test(effectiveFrom) && (!effectiveTo || /^\d{4}-\d{2}-\d{2}$/.test(effectiveTo)) && (!effectiveTo || effectiveTo >= effectiveFrom) && source && sourceVersion
+      ? { limitPercent, effectiveFrom, effectiveTo, source, sourceVersion, sourceUrl }
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeListingDate(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const raw = String(value).trim();
+  const dateMatch = raw.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (dateMatch) return validListingDate(`${dateMatch[1]}-${dateMatch[2]}-${dateMatch[3]}`);
+  if (!/^\d{11,13}$/.test(raw)) return null;
+  const milliseconds = Number(raw);
+  if (!Number.isSafeInteger(milliseconds)) return null;
+  const date = new Date(milliseconds);
+  return Number.isNaN(date.getTime()) ? null : validListingDate(shanghaiDate(date.toISOString()));
+}
+
+function validListingDate(value: string): string | null {
+  const [year, month, day] = value.split("-").map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+  const shanghaiToday = shanghaiDate(new Date().toISOString());
+  return value < EARLIEST_A_SHARE_LISTING_DATE || value > shanghaiToday ? null : value;
+}
+
+function normalizeIndustryField(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  const name = String(value).replace(/[\u00a0\s]+/g, "").trim();
+  return !name || name === "-" || name === "--" || name === "未知" || name === "暂无" ? null : name.slice(0, 80);
 }
 
 /** 东财日/周/月 K 行：[date, open, close, high, low, volume, amount, ...]。 */

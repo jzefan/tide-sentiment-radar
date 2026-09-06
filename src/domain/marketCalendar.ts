@@ -1,3 +1,5 @@
+/** Update this registry from the exchange's annual closure notice before expiry. */
+export const MARKET_CALENDAR_EXPIRES_ON = "2026-12-31";
 const CALENDAR_YEAR = 2026;
 
 // 上海证券交易所 2026 年休市安排：
@@ -58,4 +60,32 @@ export function marketPhaseAt(now: Date): MarketPhase {
 export function isTradingSession(now: Date): boolean {
   const phase = marketPhaseAt(now);
   return phase.calendarVerified ? phase.label === "盘中监测" : true;
+}
+
+/** Calendar decision for an explicit exchange trade date; unknown calendar years fail closed for formal freezes. */
+export function isTradingDate(tradeDate: string): boolean {
+  // Formal daily-candidate freezes fail closed after the published calendar expires.
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate) || Number(tradeDate.slice(0, 4)) !== CALENDAR_YEAR) return false;
+  const weekday = new Date(`${tradeDate}T00:00:00.000Z`).getUTCDay();
+  return weekday !== 0 && weekday !== 6 && !CLOSED_DATES.has(tradeDate);
+}
+
+const listingAgeCache = new Map<string, number>();
+
+/**
+ * Conservative, calendar-verified listing age for the calendar year supported by
+ * formal freezes.  Listings from an earlier year are counted from January 1 of
+ * the verified year, which is a safe lower bound and avoids depending on how
+ * many quote rows happen to exist locally.
+ */
+export function verifiedTradingDaysSinceListing(listingDate: string | null, tradeDate: string): number {
+  if (!listingDate || !/^\d{4}-\d{2}-\d{2}$/.test(listingDate) || !/^\d{4}-\d{2}-\d{2}$/.test(tradeDate) || listingDate > tradeDate || Number(tradeDate.slice(0, 4)) !== CALENDAR_YEAR) return 0;
+  const cacheKey = `${listingDate}:${tradeDate}`; const cached = listingAgeCache.get(cacheKey); if (cached !== undefined) return cached;
+  const start = listingDate.slice(0, 4) === String(CALENDAR_YEAR) ? listingDate : `${CALENDAR_YEAR}-01-01`;
+  let count = 0;
+  for (let cursor = new Date(`${start}T00:00:00.000Z`), end = new Date(`${tradeDate}T00:00:00.000Z`); cursor <= end; cursor = new Date(cursor.valueOf() + 86_400_000)) {
+    if (isTradingDate(cursor.toISOString().slice(0, 10))) count += 1;
+  }
+  listingAgeCache.set(cacheKey, count);
+  return count;
 }

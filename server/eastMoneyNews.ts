@@ -83,14 +83,15 @@ async function searchStockNews(code: string, name: string): Promise<RawClue[]> {
 function mapNewsRow(row: EastMoneyNewsRow, code: string): RawClue | null {
   const id = String(row.code ?? "");
   const title = stripHtml(String(row.title ?? ""));
-  if (!id || !title) return null;
+  const publishedAt = toIso(String(row.date ?? ""));
+  if (!id || !title || !publishedAt) return null;
   return {
     id: `个股新闻-${id}`,
     source: row.mediaName ? String(row.mediaName) : "东方财富新闻",
     sourceKind: "news",
     title: title.slice(0, 120),
     summary: stripHtml(String(row.content ?? title)).slice(0, 240),
-    publishedAt: toIso(String(row.date ?? "")),
+    publishedAt,
     url: String(row.url ?? `http://finance.eastmoney.com/a/${id}.html`),
     stockCodes: code ? [code] : [],
     interactionCount: 0,
@@ -113,8 +114,8 @@ function stripHtml(value: string) {
   return value.replace(/<[^>]+>/g, "").replace(/&nbsp;|&amp;|&quot;|&#39;/g, " ").replace(/\s+/g, " ").trim();
 }
 
-function toIso(value: string) {
+function toIso(value: string): string | null {
   const normalized = value.replace(/:(\d{3})$/, ".$1").replace(" ", "T");
   const date = new Date(normalized.includes("+") || normalized.endsWith("Z") ? normalized : `${normalized}+08:00`);
-  return Number.isNaN(date.valueOf()) ? new Date().toISOString() : date.toISOString();
+  return Number.isNaN(date.valueOf()) ? null : date.toISOString();
 }

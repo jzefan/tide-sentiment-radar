@@ -9,14 +9,18 @@ import type {
   StockSnapshot,
   ThemePulse,
 } from "../src/domain/types.ts";
-import { getClueCount, getStoredClues, saveClues, saveDailySentiment } from "./database.ts";
+import { getClueCount, getStoredClues, saveClues, saveDailySentiment, saveIndustryDailySnapshots, settleIndustryForwardOutcomes, saveClueIndustryLinks, listTradeDates, getDailyDiscussionWindows, saveDailyDiscussionWindows, getRecentAmounts, saveEastMoneyDailyBars } from "./database.ts";
 import { diagLog } from "./diagLog.ts";
-import { getLiveClues, type RawClue } from "./eastMoney.ts";
-import type { EastMoneyMarketQuote } from "./eastMoneyMarket.ts";
-import { isTradingSession } from "../src/domain/marketCalendar.ts";
+import { getLiveClues, type LiveClueSourceState, type RawClue } from "./eastMoney.ts";
+import { fetchEastMoneyDailyBars, type EastMoneyMarketQuote } from "./eastMoneyMarket.ts";
+import { isTradingDate, isTradingSession } from "../src/domain/marketCalendar.ts";
 import { readStoredMarketQuotes, syncMarketQuotes, type MarketQuote, type MarketSyncResult } from "./marketSync.ts";
 import { classifyText } from "./sentiment.ts";
 import type { DiscussionSourceState } from "./userPosts.ts";
+import { industryCodeForName, normalizeIndustryName } from "./industry.ts";
+import { buildIndustryAnalytics } from "./industryAnalytics.ts";
+import { buildDailyCandidatePreview, maybeFreezeDailyCandidates, settleDailyCandidateOutcomes, type DailyCandidateSource } from "./dailyCandidateService.ts";
+import { DAILY_FOCUS_MIN_AMOUNT, DAILY_FOCUS_WEIGHTS, winsorizedPercentile, type DailyCandidateScores } from "./dailyCandidateStrategy.ts";
 
 interface RadarSnapshot {
   quotes: MarketQuote[];
@@ -31,6 +35,7 @@ interface RadarSnapshot {
   forumLicenseId: string | null;
   forumTermsUrl: string | null;
   discussionSources: DiscussionSourceState[];
+  sourceStates: LiveClueSourceState[];
   marketStale: boolean;
   marketCached: boolean;
   marketSourceTier: "primary" | "delayed";
@@ -41,6 +46,44 @@ interface RadarSnapshot {
 export const MOVER_AMOUNT_TOP = 150;
 export const MOVER_GAIN_TOP = 100;
 export const MOVER_LOSS_TOP = 50;
+const DAILY_CANDIDATE_HISTORY_MAX_CODES = 120;
+const DAILY_CANDIDATE_HISTORY_CONCURRENCY = 8;
+
+export interface DailyCandidateHistoryContext {
+  quotes: MarketQuote[];
+  stocks: StockSnapshot[];
+  tradeDate: string;
+}
+
+export interface LiveFocusFallbackItem {
+  code: string;
+  name: string;
+  rank: number;
+  pctChange: number;
+  amount: number;
+  textDirection: number | null;
+  discussionCount: number;
+  industryName: string | null;
+  liveScore: number;
+  scores: DailyCandidateScores;
+  state: "awaiting-history";
+  reasons: string[];
+}
+
+type DailyCandidateHistoryFetcher = typeof fetchEastMoneyDailyBars;
+let activeDailyCandidateHistoryHydration: Promise<{ requested: number; hydrated: number; failed: number }> | null = null;
+let activeDailyCandidateHistoryTradeDate = "";
+
+/** 即使首次同步尚未完成，也要在数据源页保留全部讨论来源的状态行。 */
+export function defaultDiscussionSources(): DiscussionSourceState[] {
+  return [
+    { id: "eastmoney-guba", name: "东方财富股吧", state: "degraded", detail: "尚未完成首次同步", count: 0 },
+    { id: "eastmoney-guba-replies", name: "东方财富股吧评论", state: "degraded", detail: "尚未完成首次同步", count: 0 },
+    { id: "xueqiu", name: "雪球讨论", state: "disabled", detail: "需要用户提供合法会话；未配置", count: 0 },
+    { id: "weibo", name: "微博讨论", state: "disabled", detail: "需要本机浏览器；未配置", count: 0 },
+    { id: "ths-circle", name: "同花顺圈子", state: "disabled", detail: "等待平台授权数据接口", count: 0 },
+  ];
+}
 
 export interface MoverSelection {
   turnoverHeavy: Set<string>;
@@ -80,6 +123,7 @@ export function selectMovers(items: MarketQuote[]): MoverSelection {
 function toDailySentiment(stock: StockSnapshot): DailySentimentSnapshot | null {
   if (stock.analysisStatus !== "scored") return null;
   return {
+    textDirectionScore: stock.textDirectionScore,
     radarScore: stock.radarScore,
     alertScore: stock.alertScore,
     signal: stock.signal,
@@ -130,6 +174,32 @@ export function buildHistoricalStocks(
 /** 定时抓取周期：行情约每分钟一次；讨论层内部另有 5 分钟缓存，所有抓取都在后台进行。 */
 const SNAPSHOT_REFRESH_MS = 60_000;
 
+/**
+ * Full-market polling continues through the close-finalization window.  A 14:59
+ * snapshot cannot prove the immutable 15:00 close used by daily-focus, so the
+ * scheduler keeps fetching until the 15:30 decision deadline.
+ */
+export function shouldUseFullMarketRefresh(now: Date): boolean {
+  if (isTradingSession(now)) return true;
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hour12: false,
+  }).formatToParts(now);
+  const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  const tradeDate = `${read("year")}-${read("month")}-${read("day")}`;
+  const minutes = Number(read("hour")) * 60 + Number(read("minute"));
+  return isTradingDate(tradeDate) && minutes >= 15 * 60 && minutes < 15 * 60 + 30;
+}
+
+/** D-6 close is the lower proof boundary needed to rebuild D-1..D-5 comparable discussion windows. */
+export function dailyDiscussionQueryFrom(tradeDate: string, tradeDates: string[]): string | null {
+  const previous = [...new Set(tradeDates)]
+    .filter((date) => /^\d{4}-\d{2}-\d{2}$/.test(date) && date < tradeDate)
+    .sort();
+  const baselineBoundaryDate = previous.at(-6);
+  return baselineBoundaryDate ? `${baselineBoundaryDate}T07:00:00.000Z` : null;
+}
+
 /** 当前快照（内存缓存，由后台定时任务刷新；接口只读它，绝不阻塞等待远端抓取）。 */
 let currentSnapshot: RadarSnapshot | null = null;
 /** 单飞锁：同一时刻只允许一次后台刷新。 */
@@ -171,7 +241,7 @@ async function buildFromStore(): Promise<void> {
  */
 function refreshSnapshot(light: boolean | null = null): Promise<void> {
   if (refreshPromise) return refreshPromise;
-  const useLight = light ?? !isTradingSession(new Date());
+  const useLight = light ?? !shouldUseFullMarketRefresh(new Date());
   diagLog("radar", useLight ? "休市轻量刷新（行情用存库，线索全量抓取）" : "交易时段完整刷新");
   const build = useLight ? buildLightSnapshotInner() : buildSnapshotInner([], false);
   refreshPromise = build
@@ -187,8 +257,15 @@ export function startScheduledRefresh(): void {
   refreshTimer = setInterval(() => void refreshSnapshot(), SNAPSHOT_REFRESH_MS);
 }
 
+/** 停止后台刷新；服务退出或监听失败时调用，避免定时器把进程继续挂住。 */
+export function stopScheduledRefresh(): void {
+  if (!refreshTimer) return;
+  clearInterval(refreshTimer);
+  refreshTimer = null;
+}
+
 /** 线索包：实时抓取与存库回退共用同一种结构。 */
-interface SnapshotClues {
+export interface SnapshotClues {
   items: RawClue[];
   updatedAt: string;
   failures: string[];
@@ -197,6 +274,213 @@ interface SnapshotClues {
   forumLicenseId: string | null;
   forumTermsUrl: string | null;
   discussionSources: DiscussionSourceState[];
+  sourceStates: LiveClueSourceState[];
+}
+
+/**
+ * Explicit, clock-free bridge between the persisted radar snapshot and daily-focus.
+ * Preserve independently audited source states verbatim: neither the aggregate clue
+ * timestamp nor a fetch timestamp is a coverage watermark.
+ */
+export function buildDailyCandidateSourceFromRadar(input: {
+  market: Pick<MarketSyncResult, "items" | "updatedAt" | "tradeDate" | "stale">;
+  clues: Pick<SnapshotClues, "updatedAt" | "failures" | "sourceStates" | "discussionSources">;
+  stocks: StockSnapshot[];
+  events: SentimentEvent[];
+  tradeDates: string[];
+  discussionWindowsByCode?: DailyCandidateSource["discussionWindowsByCode"];
+}): DailyCandidateSource {
+  const recentTradeDates = input.tradeDates.filter((date) => date <= input.market.tradeDate).sort();
+  const discussionDates = recentTradeDates.filter((date) => date < input.market.tradeDate).slice(-5);
+  const persistedDiscussion = input.discussionWindowsByCode ?? Object.fromEntries(Object.entries(getDailyDiscussionWindows(discussionDates)).map(([code, windows]) => [code, windows
+    .filter((window) => window.state === "connected" && window.cursorExhausted)
+    .map((window) => ({ ...window, state: "connected" as const, cursorExhausted: true as const, elapsedMinutes: 240, verified: true as const }))]));
+  return {
+    quotes: input.market.items,
+    stocks: input.stocks,
+    events: input.events,
+    tradeDate: input.market.tradeDate,
+    marketAsOf: input.market.updatedAt,
+    clueAsOf: input.clues.updatedAt,
+    marketStale: input.market.stale,
+    marketComplete: input.market.items.length >= 4_000,
+    isTradingDay: isTradingDate(input.market.tradeDate),
+    clueFailures: input.clues.failures,
+    sourceStates: input.clues.sourceStates,
+    discussionWindowsByCode: persistedDiscussion,
+    recentTradeDates,
+    previousTradeDate: recentTradeDates.filter((date) => date < input.market.tradeDate).at(-1) ?? input.market.tradeDate,
+    discussionSources: input.clues.discussionSources.map((source) => ({ ...source, coveredThrough: null })),
+  };
+}
+
+/** Builds a read-only current preview when no prospective list has been frozen yet. */
+export async function buildDailyCandidatePreviewFromRadar(watchlist: string[]) {
+  const snapshot = await buildRadarSnapshot(watchlist);
+  const now = new Date();
+  const source = buildDailyCandidateSourceFromRadar({
+    market: { items: snapshot.quotes, updatedAt: snapshot.asOf, tradeDate: snapshot.tradeDate, stale: snapshot.marketStale },
+    clues: { updatedAt: snapshot.clueAsOf, failures: snapshot.clueFailures, sourceStates: snapshot.sourceStates, discussionSources: snapshot.discussionSources },
+    stocks: snapshot.stocks,
+    events: snapshot.events,
+    tradeDates: listTradeDates(),
+  });
+  if (isTradingSession(now) && snapshot.tradeDate === shanghaiDate(now)) {
+    const hydration = await ensureDailyCandidateHistory(snapshot);
+    return withLiveFocusFallback(previewWithHistoryQuality(buildDailyCandidatePreview(source, now), hydration), snapshot);
+  }
+  return withLiveFocusFallback(buildDailyCandidatePreview(source, now), snapshot);
+}
+
+/** Complete the online-history step before calculating the live preview. */
+export async function buildDailyCandidatePreviewWithHistory(
+  source: DailyCandidateSource,
+  now: Date,
+  fetchHistory: DailyCandidateHistoryFetcher = fetchEastMoneyDailyBars,
+) {
+  const hydration = await hydrateDailyCandidateHistory({ quotes: source.quotes, stocks: source.stocks, tradeDate: source.tradeDate }, fetchHistory);
+  return withLiveFocusFallback(previewWithHistoryQuality(buildDailyCandidatePreview(source, now), hydration), source);
+}
+
+/** Always retain useful current-day stock information while formal five-day evidence is incomplete. */
+export function buildLiveFocusFallback(input: DailyCandidateHistoryContext): LiveFocusFallbackItem[] {
+  const stockByCode = new Map(input.stocks.map((stock) => [stock.code, stock]));
+  const universe = input.quotes
+    .filter((quote) => (quote.exchange === "SH" || quote.exchange === "SZ")
+      && quote.price > 0
+      && quote.amount > 0
+      && !/(?:^|\s)\*?ST(?=\s|[^A-Za-z0-9]|$)|退市/i.test(quote.name));
+  const amountReference = universe.map((quote) => quote.amount);
+  const priceReference = universe.map((quote) => quote.pctChange);
+  const discussionReference = universe.map((quote) => stockByCode.get(quote.code)?.mentionCount ?? 0);
+  const weighted = (signal: number, weight: number) => Math.round(clamp(signal) / 100 * weight * 10_000) / 10_000;
+  return universe
+    .filter((quote) => quote.amount >= DAILY_FOCUS_MIN_AMOUNT)
+    .map((quote) => {
+      const stock = stockByCode.get(quote.code);
+      const industry = stock?.industryPulse;
+      const industrySignal = industry ? .3 * industry.textHeat + .2 * industry.textDirection + .3 * industry.marketStrength + .2 * industry.breadth : 0;
+      const scores: DailyCandidateScores = {
+        turnover: weighted(winsorizedPercentile(quote.amount, amountReference), DAILY_FOCUS_WEIGHTS.turnover),
+        direction: weighted(stock?.textDirectionScore ?? 0, DAILY_FOCUS_WEIGHTS.direction),
+        discussion: weighted(winsorizedPercentile(stock?.mentionCount ?? 0, discussionReference), DAILY_FOCUS_WEIGHTS.discussion),
+        price: weighted(winsorizedPercentile(quote.pctChange, priceReference), DAILY_FOCUS_WEIGHTS.price),
+        industry: weighted(industrySignal, DAILY_FOCUS_WEIGHTS.industry),
+        reliability: stock?.analysisStatus === "scored" ? DAILY_FOCUS_WEIGHTS.reliability : 0,
+      };
+      const liveScore = Math.round(Object.values(scores).reduce((sum, value) => sum + value, 0) * 10_000) / 10_000;
+      return { quote, stock, scores, liveScore };
+    })
+    .sort((left, right) => right.liveScore - left.liveScore
+      || right.scores.turnover - left.scores.turnover
+      || right.quote.amount - left.quote.amount
+      || left.quote.code.localeCompare(right.quote.code))
+    .slice(0, 10)
+    .map(({ quote, stock, scores, liveScore }, index) => {
+      return {
+        code: quote.code,
+        name: quote.name,
+        rank: index + 1,
+        pctChange: quote.pctChange,
+        amount: quote.amount,
+        textDirection: stock?.textDirectionScore ?? null,
+        discussionCount: stock?.mentionCount ?? 0,
+        industryName: stock?.industry?.name ?? quote.industryName ?? null,
+        liveScore,
+        scores,
+        state: "awaiting-history" as const,
+        reasons: [
+          quote.pctChange > 0 ? "当日上涨" : "成交活跃",
+          `成交额 ${(quote.amount / 100_000_000).toFixed(2)} 亿`,
+          `成交评分 ${scores.turnover.toFixed(1)} / 30`,
+          stock?.textDirectionScore !== null && stock?.textDirectionScore !== undefined ? `文本方向 ${stock.textDirectionScore}` : "文本方向待补充",
+        ],
+      };
+    });
+}
+
+/**
+ * Select the small, already-scored intraday universe that could realistically enter daily focus.
+ * Historical K-lines are never fetched for the whole market on demand.
+ */
+export function dailyCandidateHistoryCodes(input: DailyCandidateHistoryContext): string[] {
+  const stockByCode = new Map(input.stocks.map((stock) => [stock.code, stock]));
+  return input.quotes
+    .filter((quote) => {
+      const stock = stockByCode.get(quote.code);
+      return (quote.exchange === "SH" || quote.exchange === "SZ")
+        && quote.pctChange > 0
+        && quote.amount >= 100_000_000
+        && stock?.analysisStatus === "scored"
+        && (stock.textDirectionScore ?? 0) >= 55;
+    })
+    .sort((left, right) => {
+      const leftStock = stockByCode.get(left.code)!;
+      const rightStock = stockByCode.get(right.code)!;
+      return (rightStock.textDirectionScore ?? 0) - (leftStock.textDirectionScore ?? 0)
+        || right.amount - left.amount
+        || right.pctChange - left.pctChange
+        || left.code.localeCompare(right.code);
+    })
+    .slice(0, DAILY_CANDIDATE_HISTORY_MAX_CODES)
+    .map((quote) => quote.code);
+}
+
+/** Fetch and persist only missing five-day amount histories needed by the live daily-focus preview. */
+export async function hydrateDailyCandidateHistory(
+  input: DailyCandidateHistoryContext,
+  fetchHistory: DailyCandidateHistoryFetcher = fetchEastMoneyDailyBars,
+): Promise<{ requested: number; hydrated: number; failed: number }> {
+  const candidates = dailyCandidateHistoryCodes(input);
+  const cached = getRecentAmounts(candidates, 5, input.tradeDate);
+  const missing = candidates.filter((code) => (cached.get(code)?.length ?? 0) < 5);
+  let cursor = 0;
+  let hydrated = 0;
+  let failed = 0;
+  const worker = async () => {
+    while (cursor < missing.length) {
+      const code = missing[cursor++]!;
+      try {
+        const result = await fetchHistory({ code, limit: 10, adjustment: "none", timeoutMs: 4_000 });
+        if (result.items.some((item) => item.amount !== null)) {
+          saveEastMoneyDailyBars(result);
+          hydrated += 1;
+        }
+      } catch {
+        failed += 1;
+      }
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(DAILY_CANDIDATE_HISTORY_CONCURRENCY, missing.length) }, worker));
+  return { requested: missing.length, hydrated, failed };
+}
+
+async function ensureDailyCandidateHistory(snapshot: RadarSnapshot): Promise<{ requested: number; hydrated: number; failed: number }> {
+  if (!activeDailyCandidateHistoryHydration || activeDailyCandidateHistoryTradeDate !== snapshot.tradeDate) {
+    activeDailyCandidateHistoryTradeDate = snapshot.tradeDate;
+    activeDailyCandidateHistoryHydration = hydrateDailyCandidateHistory(snapshot)
+      .catch(() => ({ requested: 0, hydrated: 0, failed: 0 }))
+      .finally(() => { activeDailyCandidateHistoryHydration = null; });
+  }
+  return activeDailyCandidateHistoryHydration;
+}
+
+function previewWithHistoryQuality(
+  preview: ReturnType<typeof buildDailyCandidatePreview>,
+  hydration: { requested: number; hydrated: number; failed: number },
+) {
+  const history = hydration.requested === 0 ? "cached" : hydration.failed === hydration.requested ? "unavailable" : hydration.failed > 0 ? "partial" : "online";
+  return { ...preview, dataQuality: { ...preview.dataQuality, history, historyRequested: hydration.requested, historyHydrated: hydration.hydrated, historyFailed: hydration.failed } };
+}
+
+function withLiveFocusFallback<T extends ReturnType<typeof buildDailyCandidatePreview>>(preview: T, input: DailyCandidateHistoryContext) {
+  return preview.items.length ? preview : { ...preview, liveFocusItems: buildLiveFocusFallback(input) };
+}
+
+function shanghaiDate(now: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+  const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${read("year")}-${read("month")}-${read("day")}`;
 }
 
 async function buildSnapshotInner(watchlist: string[], force: boolean): Promise<RadarSnapshot> {
@@ -218,22 +502,63 @@ async function buildSnapshotFromMarket(market: MarketSyncResult, force: boolean)
   const { focusCodes } = selectMovers(market.items);
   // 股票名称映射：微博等按名称搜索的讨论源使用。
   const stockNames = new Map(market.items.map((quote) => [quote.code, quote.name]));
-  const liveClues = await getLiveClues(force, focusCodes, stockNames).catch((error) => {
+  const tradeDates = listTradeDates();
+  const previousTradeDate = tradeDates.find((date) => date < market.tradeDate);
+  const discussionQueryFrom = dailyDiscussionQueryFrom(market.tradeDate, tradeDates);
+  const liveClues = await getLiveClues(force, focusCodes, stockNames, previousTradeDate ? {
+    tradeDate: market.tradeDate,
+    previousTradeDate,
+    ...(discussionQueryFrom ? { discussionQueryFrom } : {}),
+  } : undefined).catch((error) => {
       const stored = getStoredClues();
       if (!stored.length) throw error;
-      return { items: stored, updatedAt: stored[0]?.publishedAt ?? new Date().toISOString(), cached: true, failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: [] };
+      return { items: stored, updatedAt: stored[0]?.publishedAt ?? new Date().toISOString(), cached: true, failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: defaultDiscussionSources(), sourceStates: [] };
     });
   diagLog("radar", "线索就绪", liveClues.items.length, "条", liveClues.cached ? "(缓存)" : "");
   saveClues(liveClues.items);
+  persistCurrentDiscussionWindows(market, liveClues);
   return assembleSnapshot(market, liveClues);
+}
+
+const closeCutoff = (tradeDate: string) => `${tradeDate}T07:00:00.000Z`;
+
+/**
+ * Captures the official discussion interval only from a source's own exhausted
+ * server range proof.  We deliberately write one immutable record per
+ * code/trade-date/source, including genuine zero-count windows, so a later
+ * candidate rebuild never has to fabricate a zero baseline.
+ */
+export function persistCurrentDiscussionWindows(market: Pick<MarketSyncResult, "items" | "tradeDate">, clues: Pick<SnapshotClues, "items" | "sourceStates">): void {
+  const cutoff = closeCutoff(market.tradeDate);
+  // listTradeDates is descending: the first prior value is the immediately
+  // preceding trading day, not the oldest row in the database.
+  const previousTradeDate = listTradeDates().find((date) => date < market.tradeDate);
+  if (!previousTradeDate) return;
+  const featureStart = closeCutoff(previousTradeDate);
+  const windows = clues.sourceStates
+    .filter((state) => state.role === "discussion" && state.state === "connected" && state.queryFrom !== null && state.queryTo !== null && state.coveredThrough !== null && state.coveredCodes.length > 0
+      && state.queryFrom <= featureStart && state.queryTo >= cutoff && state.coveredThrough >= cutoff)
+    .flatMap((state) => {
+      const authorized = new Set(state.eventIds);
+      const sourceItems = clues.items.filter((item) => item.adapterId === state.id && authorized.has(item.id) && item.publishedAt > featureStart && item.publishedAt <= cutoff);
+      return market.items.filter((quote) => state.coveredCodes.includes(quote.code)).map((quote) => {
+        const related = sourceItems.filter((item) => item.stockCodes.includes(quote.code));
+        return {
+          code: quote.code, tradeDate: market.tradeDate, sourceId: state.id, adapterId: state.id, state: "connected" as const,
+          featureStart, featureCutoff: cutoff, queryFrom: state.queryFrom!, queryTo: state.queryTo!, cursorExhausted: true as const, coveredThrough: state.coveredThrough!, coveredCodes: state.coveredCodes,
+          count: related.length, interactions: related.reduce((sum, item) => sum + Math.max(0, item.interactionCount), 0),
+        };
+      });
+    });
+  if (windows.length) saveDailyDiscussionWindows(windows);
 }
 
 /** 冷启动：只用数据库已存行情与线索构建快照（不联网，毫秒级；不重复落库舆情快照）。 */
 function buildSnapshotFromStore(market: MarketSyncResult): RadarSnapshot {
   const stored = getStoredClues();
   const clues: SnapshotClues = stored.length
-    ? { items: stored, updatedAt: stored[0]?.publishedAt ?? new Date().toISOString(), failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: [] }
-    : { items: [], updatedAt: new Date().toISOString(), failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: [] };
+    ? { items: stored, updatedAt: stored[0]?.publishedAt ?? new Date().toISOString(), failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: defaultDiscussionSources(), sourceStates: [] }
+    : { items: [], updatedAt: new Date().toISOString(), failures: ["实时线索连接"], forumEnabled: false, forumSource: "论坛舆情 · 待授权接入", forumLicenseId: null, forumTermsUrl: null, discussionSources: defaultDiscussionSources(), sourceStates: [] };
   return assembleSnapshot(market, clues, false);
 }
 
@@ -253,6 +578,9 @@ function assembleSnapshot(market: MarketSyncResult, clues: SnapshotClues, persis
   const { turnoverHeavy, gainers, losers, gainRank, lossRank } = selectMovers(market.items);
   const quoteMap = new Map(market.items.map((quote) => [quote.code, quote]));
   const events = linkAndAnalyzeClues(clues.items, market.items, quoteMap);
+  // 线索与行业关系在事件生成后立即落库，保证重启后仍可审计；公司事件只沿直接关联股票
+  // 的真实行业归属落链，不再因为标题里的行业关键词扩散到其他行业。
+  saveClueIndustryLinks(buildClueIndustryLinks(events, market.items, quoteMap));
   const eventMap = new Map<string, SentimentEvent[]>();
   for (const event of events) {
     for (const related of event.relatedStocks) {
@@ -276,6 +604,60 @@ function assembleSnapshot(market: MarketSyncResult, clues: SnapshotClues, persis
         .map((stock) => ({ code: stock.code, tradeDate: market.tradeDate, sentiment: toDailySentiment(stock) }))
         .filter((row): row is { code: string; tradeDate: string; sentiment: DailySentimentSnapshot } => row.sentiment !== null),
     );
+    const industryAnalytics = buildIndustryAnalytics({
+      stocks,
+      events,
+      asOf: market.updatedAt,
+      clueAsOf: clues.updatedAt,
+      tradeDate: market.tradeDate,
+    });
+    saveIndustryDailySnapshots(industryAnalytics.items.map((pulse) => ({
+      industryCode: pulse.profile.code,
+      industryName: pulse.profile.name,
+      tradeDate: market.tradeDate,
+      observedAt: market.updatedAt,
+      clueAsOf: clues.updatedAt,
+      textHeat: pulse.textHeat,
+      textDirection: pulse.textDirection,
+      textConfidence: pulse.textConfidence,
+      marketStrength: pulse.marketStrength,
+      industryReturn: pulse.industryReturn,
+      marketReturn: pulse.industryReturn - pulse.marketExcess,
+      marketExcess: pulse.marketExcess,
+      breadth: pulse.breadth,
+      amountShare: pulse.amountShare,
+      relation: pulse.relation,
+      stage: pulse.stage,
+      driver: pulse.driver,
+      informationCategories: pulse.informationCategories,
+      independentEvents: pulse.independentEvents,
+      mentionCount: pulse.mentionCount,
+      discussionCount: pulse.discussionCount,
+      sourceCount: pulse.sourceCount,
+      stockCoverage: pulse.stockCoverage,
+      eligibleStockCount: pulse.eligibleStockCount,
+      memberCodes: industryAnalytics.stocks.filter((stock) => stock.industry.code === pulse.profile.code).map((stock) => stock.code),
+    })));
+    // 每次真实行情刷新后尝试结算所有已到期的行业观察，未到期记录保持 observing。
+    settleIndustryForwardOutcomes(market.tradeDate);
+    // 每日聚焦只在行情、线索、舆情及行业快照均已持久化后运行。服务本身不抓取数据；
+    // 将本轮快照和调用时刻显式传入，失败也绝不能反过来影响雷达主快照发布。
+    try {
+      maybeFreezeDailyCandidates(buildDailyCandidateSourceFromRadar({
+        market,
+        clues,
+        stocks,
+        events,
+        tradeDates: listTradeDates(),
+      }), new Date());
+    } catch (error) {
+      diagLog("daily-candidates", "冻结跳过", error instanceof Error ? error.message : String(error));
+    }
+    try {
+      settleDailyCandidateOutcomes(market.tradeDate);
+    } catch (error) {
+      diagLog("daily-candidates", "结算跳过", error instanceof Error ? error.message : String(error));
+    }
   }
   return {
     quotes: market.items,
@@ -290,11 +672,45 @@ function assembleSnapshot(market: MarketSyncResult, clues: SnapshotClues, persis
     forumLicenseId: clues.forumLicenseId,
     forumTermsUrl: clues.forumTermsUrl,
     discussionSources: clues.discussionSources,
+    sourceStates: clues.sourceStates,
     marketStale: market.stale,
     marketCached: market.cached,
     marketSourceTier: market.sourceTier,
     tradeDate: market.tradeDate,
   };
+}
+
+function buildClueIndustryLinks(events: SentimentEvent[], quotes: MarketQuote[], quoteMap: Map<string, MarketQuote>) {
+  const knownIndustryNames = [...new Set(quotes.map((quote) => normalizeIndustryName(quote.industryName)).filter((value): value is string => Boolean(value)))];
+  return events.flatMap((event) => {
+    const directIndustry = new Map<string, { name: string; relevance: number; evidence: string }>();
+    for (const related of event.relatedStocks) {
+      const quote = quoteMap.get(related.code);
+      const name = normalizeIndustryName(quote?.industryName);
+      if (!name) continue;
+      const code = industryCodeForName(name);
+      directIndustry.set(code, { name, relevance: Math.max(related.relevance, directIndustry.get(code)?.relevance ?? 0), evidence: `通过直接关联股票${related.code}归属行业` });
+    }
+    // 公司公告/公司事件不得使用文本关键词做行业扩散；其行业关系只来自直接关联股票。
+    if (!directIndustry.size && event.category !== "公司公告" && event.eventType !== "公司") {
+      const text = `${event.title}${event.summary}${event.topics.join("")}`;
+      for (const name of knownIndustryNames) {
+        if (!text.includes(name)) continue;
+        const code = industryCodeForName(name);
+        directIndustry.set(code, { name, relevance: 72, evidence: `线索文本明确提及行业“${name}”` });
+      }
+    }
+    const influenceDirection: -1 | 0 | 1 = event.tone === "positive" ? 1 : event.tone === "negative" ? -1 : 0;
+    return [...directIndustry.entries()].map(([industryCode, value]) => ({
+      clueId: event.id,
+      industryCode,
+      industryName: value.name,
+      relevance: value.relevance,
+      influenceDirection,
+      chainPosition: null,
+      evidence: value.evidence,
+    }));
+  });
 }
 
 export function buildDashboard(snapshot: RadarSnapshot, watchlist: string[]): DashboardData {
@@ -391,16 +807,19 @@ function linkAndAnalyzeClues(clues: RawClue[], quotes: MarketQuote[], quoteMap: 
       relatedStocks,
       corroboration: 1,
       url: clue.url,
+      adapterId: clue.adapterId,
     };
   }).filter((event): event is SentimentEvent => event !== null)
     .sort((a, b) => b.publishedAt.localeCompare(a.publishedAt));
 }
 
 function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlisted: boolean, asOf: string, moverTags: Array<"涨幅大" | "跌幅大" | "成交额大"> = [], changeRank: number | null = null): StockSnapshot {
+  const industry = toIndustryReference(quote, asOf);
   if (!events.length) {
     const emptyFactors: ScoreFactors = { sentiment: 0, attention: 0, velocity: 0, consensus: 0, sourceQuality: 0, priceConfirm: 50, freshness: 0 };
     return {
       ...quote,
+      textDirectionScore: null,
       radarScore: null,
       alertScore: null,
       signal: "证据不足",
@@ -418,6 +837,7 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
       isWatchlisted,
       moverTags,
       changeRank,
+      ...(industry ? { industry } : {}),
     };
   }
 
@@ -445,6 +865,7 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
     freshness: Math.round(freshness),
   };
   const radarScore = calculateRadarScore(factors);
+  const textDirectionScore = Math.round(clamp(50 + sentiment / 2));
   const alertScore = calculateAlertScore(factors);
   const sourceCounts = new Map<string, number>();
   for (const event of events) sourceCounts.set(event.source, (sourceCounts.get(event.source) ?? 0) + 1);
@@ -454,6 +875,7 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
   const sentimentTrend = events.slice(0, 12).reverse().map((event) => toneScore(event.tone));
   return {
     ...quote,
+    textDirectionScore,
     radarScore,
     alertScore,
     signal: signalFromFactors(factors, radarScore),
@@ -471,6 +893,20 @@ function aggregateStock(quote: MarketQuote, events: SentimentEvent[], isWatchlis
     isWatchlisted,
     moverTags,
     changeRank,
+    ...(industry ? { industry } : {}),
+  };
+}
+
+function toIndustryReference(quote: Pick<MarketQuote, "industryName">, asOf: string): StockSnapshot["industry"] {
+  const name = normalizeIndustryName(quote.industryName);
+  if (!name) return undefined;
+  return {
+    code: industryCodeForName(name),
+    name,
+    parent: name,
+    level: "行业",
+    taxonomy: "东方财富行业",
+    asOf,
   };
 }
 

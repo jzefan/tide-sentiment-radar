@@ -2,17 +2,24 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { readFile, stat } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { StockSnapshot } from "../src/domain/types.ts";
-import { addToWatchlist, getClueCount, getDailySentiment, getEastMoneyDailyBars, getMarketQuotesByTradeDate, getProviderState, getRecentAmounts, getWatchlist, listTradeDates, removeFromWatchlist, saveEastMoneyDailyBars, savePushedXueqiuDiscussions, saveProviderState } from "./database.ts";
+import type { DashboardData, SentimentEvent, StockSnapshot } from "../src/domain/types.ts";
+import { addToWatchlist, getClueCount, getDailyCandidateList, getDailyCandidateOutcomes, getDailySentiment, getEastMoneyDailyBars, getMarketQuotesByTradeDate, getProviderState, getRecentAmounts, getRecentPctChanges, getStoredCluesBySource, getWatchlist, listDailyCandidateLists, listTradeDates, removeFromWatchlist, saveEastMoneyDailyBars, savePushedXueqiuDiscussions, saveProviderState } from "./database.ts";
 import { fetchEastMoneyDailyBars, fetchEastMoneyPeriodBars, fetchEastMoneyTrends } from "./eastMoneyMarket.ts";
 import { loadXueqiuCookie } from "./xueqiuSession.ts";
 import { importXueqiuCookieVerified, launchXueqiuBrowserLogin, verifyAndSaveXueqiuCookie } from "./xueqiuBrowser.ts";
 import { pinyin } from "pinyin-pro";
-import { buildDashboard, buildHistoricalStocks, buildRadarSnapshot, startScheduledRefresh, stockEvents } from "./radarEngine.ts";
+import { buildDailyCandidatePreviewFromRadar, buildDashboard, buildHistoricalStocks, buildLiveFocusFallback, buildRadarSnapshot, defaultDiscussionSources, startScheduledRefresh, stopScheduledRefresh, stockEvents } from "./radarEngine.ts";
+import { buildIndustryApiResponse, getIndustryByCode, getIndustryForwardApi } from "./industryApi.ts";
+import { buildIndustryAnalytics, classifyStockIndustry } from "./industryAnalytics.ts";
+import { stopXueqiuLiveSession } from "./xueqiuBrowser.ts";
+import { stopWeiboLiveSession } from "./weiboBrowser.ts";
+import { getDailyCandidatePerformance, withFrozenBenchmarkIndustryLabels, withNextTradingDayTrends } from "./dailyCandidateService.ts";
+import { isTradingSession } from "../src/domain/marketCalendar.ts";
+import { getConvertibleBonds, isConvertibleBondSort, type ConvertibleBondView } from "./convertibleBonds.ts";
+import { getDailyFocusPool } from "./dailyFocusPoolService.ts";
+import type { DailyFocusPoolWindowSessions } from "./dailyFocusPool.ts";
 
 loadXueqiuCookie();
-// 后台定时抓取：行情、线索与舆情快照按周期落库，接口只读缓存快照，操作（排序/筛选/分页）不再触发远端抓取。
-startScheduledRefresh();
 const port = Number(process.env.API_PORT || 8787);
 // 绑定 0.0.0.0 以便从外部（浏览器）访问；如只需本机访问，可设 API_HOST=127.0.0.1
 const host = process.env.API_HOST || "0.0.0.0";
@@ -20,7 +27,25 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const distDir = join(root, "dist");
 const historyRequests = new Map<string, Promise<{ priceHistory: Array<{ date: string; close: number; volume?: number }>; state: "fresh" | "stale" | "unavailable" }>>();
 
-const server = createServer(async (request, response) => {
+/** The current exchange session is intentionally preview-only; a frozen list is shown after close. */
+export function shouldServeLiveDailyPreview(requestedDate: string | null, snapshotTradeDate: string, now: Date): boolean {
+  return (requestedDate === null || requestedDate === snapshotTradeDate)
+    && snapshotTradeDate === shanghaiDate(now)
+    && isTradingSession(now);
+}
+
+function shanghaiDate(now: Date): string {
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Asia/Shanghai",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(now);
+  const read = (type: Intl.DateTimeFormatPartTypes) => parts.find((part) => part.type === type)?.value ?? "";
+  return `${read("year")}-${read("month")}-${read("day")}`;
+}
+
+export const server = createServer(async (request, response) => {
   const requestId = crypto.randomUUID().slice(0, 8);
   const url = new URL(request.url || "/", `http://${request.headers.host || "localhost"}`);
 
@@ -42,6 +67,30 @@ const server = createServer(async (request, response) => {
 async function routeApi(request: IncomingMessage, response: ServerResponse, url: URL, requestId: string) {
   const watchlist = getWatchlist();
 
+  const discussionSources = {
+    "eastmoney-guba": "东方财富股吧",
+    "eastmoney-guba-replies": "东方财富股吧评论",
+    weibo: "微博讨论",
+  } as const;
+
+  if (request.method === "GET" && url.pathname === "/api/system/discussions") {
+    const sourceId = url.searchParams.get("source") ?? "";
+    const source = discussionSources[sourceId as keyof typeof discussionSources];
+    if (!source) return json(response, 400, { code: "BAD_SOURCE", message: "该数据源不支持查看用户讨论", requestId });
+    const requestedPage = Number(url.searchParams.get("page") || 1);
+    const page = Number.isFinite(requestedPage) ? Math.max(1, Math.trunc(requestedPage)) : 1;
+    const pageSize = 10;
+    const result = getStoredCluesBySource(source, pageSize, (page - 1) * pageSize);
+    return json(response, 200, {
+      source: sourceId,
+      items: result.items,
+      total: result.total,
+      page,
+      pageSize,
+      totalPages: Math.max(1, Math.ceil(result.total / pageSize)),
+    });
+  }
+
   if (request.method === "GET" && url.pathname === "/api/health") {
     const snapshot = await Promise.resolve(buildRadarSnapshot(watchlist)).then((value) => ({ status: "fulfilled" as const, value })).catch((reason) => ({ status: "rejected" as const, reason }));
     return json(response, 200, {
@@ -53,7 +102,44 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
 
   if (request.method === "GET" && url.pathname === "/api/dashboard") {
     const snapshot = await buildRadarSnapshot(watchlist);
-    return json(response, 200, buildDashboard(snapshot, watchlist));
+    const dashboard = buildDashboard(snapshot, watchlist);
+    return json(response, 200, withIndustryDashboard(dashboard, snapshot));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/industries") {
+    const snapshot = await buildRadarSnapshot(watchlist);
+    return json(response, 200, buildIndustryApiResponse(snapshot, {
+      query: url.searchParams.get("q") ?? undefined,
+      hotOnly: url.searchParams.get("hot_only") === "1" || url.searchParams.get("hot_only") === "true",
+      code: url.searchParams.get("code") ?? undefined,
+      relation: url.searchParams.get("relation") ?? undefined,
+      horizon: parseIndustryHorizon(url.searchParams.get("horizon")),
+    }));
+  }
+
+  const industryForwardMatch = url.pathname.match(/^\/api\/industries\/([^/]+)\/forward$/);
+  if (request.method === "GET" && industryForwardMatch) {
+    const horizon = parseIndustryHorizon(url.searchParams.get("horizon")) ?? 5;
+    return json(response, 200, getIndustryForwardApi(decodeURIComponent(industryForwardMatch[1]), horizon));
+  }
+
+  const industryMatch = url.pathname.match(/^\/api\/industries\/([^/]+)$/);
+  if (request.method === "GET" && industryMatch) {
+    const snapshot = await buildRadarSnapshot(watchlist);
+    const result = getIndustryByCode(snapshot, decodeURIComponent(industryMatch[1]));
+    if (!result) return json(response, 404, { code: "INDUSTRY_NOT_FOUND", message: "当前快照中没有可分析的行业信息", requestId });
+    return json(response, 200, {
+      ...result,
+      item: { ...result.item, profile: { ...result.item.profile, asOf: snapshot.asOf } },
+      asOf: snapshot.asOf,
+      clueAsOf: snapshot.clueAsOf,
+      tradeDate: snapshot.tradeDate,
+      methodology: {
+        textMetricsExcludePrice: true,
+        note: "当前行业热点是当前快照的描述性分类；T+1、T+3、T+5、T+10 后验结果将在各自观察周期完成后生成。",
+        version: "行业分析规则 v1",
+      },
+    });
   }
 
   if (request.method === "GET" && url.pathname === "/api/stocks") {
@@ -62,6 +148,8 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
     const signal = url.searchParams.get("signal") ?? "all";
     const market = url.searchParams.get("market") ?? "all";
     const sort = url.searchParams.get("sort") ?? "alert";
+    const industryFilter = url.searchParams.get("industry")?.trim() ?? "";
+    const hotIndustryOnly = url.searchParams.get("hot_industry") === "1" || url.searchParams.get("hot_industry") === "true";
     const tagFilter = (url.searchParams.get("tags") ?? "").split(",").map((value) => value.trim()).filter(Boolean);
     const requestedScope = url.searchParams.get("scope") ?? "movers";
     const scope = new Set(["all", "movers", "watchlist"]).has(requestedScope) ? requestedScope : "movers";
@@ -82,6 +170,7 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
       stocks = buildHistoricalStocks(quotes, watchlist, date, getDailySentiment(date));
       asOf = stocks[0]?.asOf ?? `${date}T15:00:00+08:00`;
     }
+    stocks = enrichStocksWithIndustry(stocks, snapshot, historical ? [] : snapshot.events, asOf);
 
     // 异动候选（movers/all）展示全市场股票，符合异动条件的股票带异动标签；
     // 我的自选（watchlist）只保留自选股。搜索始终在全市场范围内进行。
@@ -89,21 +178,28 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
     // 页面标题右侧永远展示全市场股票总数（不随范围与筛选变化）。
     const universeTotal = stocks.length;
     let items = scopeItems.filter((item) => {
-      const matchesQuery = !query || `${item.name}${item.code}${item.market}${item.topics.join("")}`.toLowerCase().includes(query) || stockNameInitials(item.name).includes(query);
+      const matchesQuery = !query || `${item.name}${item.code}${item.market}${item.topics.join("")}${item.industry?.name ?? ""}`.toLowerCase().includes(query) || stockNameInitials(item.name).includes(query);
       const matchesSignal = signal === "all" || item.signal === signal;
       const matchesMarket = market === "all" || item.market === market;
       const matchesTag = tagFilter.length === 0 || (item.moverTags ?? []).some((tag) => tagFilter.includes(tag));
-      return matchesQuery && matchesSignal && matchesMarket && matchesTag;
+      const matchesIndustry = !industryFilter || item.industry?.code === industryFilter || item.industry?.name === industryFilter;
+      const matchesHotIndustry = !hotIndustryOnly || (
+        (item.industryPulse?.textHeat ?? 0) >= 70
+        && (item.industryPulse?.relation === "舆情交易双热" || item.industryPulse?.relation === "舆情升温、价格未确认")
+      );
+      return matchesQuery && matchesSignal && matchesMarket && matchesTag && matchesIndustry && matchesHotIndustry;
     });
-    // 全市场口径不做“无分隐藏”：异动分/方向分排序时无分股票沉底即可，保证始终展示全市场。
+    // 全市场口径不做“无分隐藏”：异动分/文本方向排序时无分股票沉底即可，保证始终展示全市场。
     items = [...items].sort((a, b) => compareStocks(a, b, sort));
     const total = items.length;
     const start = (page - 1) * pageSize;
     const pageItems = items.slice(start, start + pageSize);
     const amountHistory = getRecentAmounts(pageItems.map((item) => item.code), 5, historical ? date : undefined);
+    const returnHistory = getRecentPctChanges(pageItems.map((item) => item.code), 22, historical ? date : undefined);
     const enriched = pageItems.map((item) => ({
       ...item,
       amountHistory: (amountHistory.get(item.code) ?? []).map((point) => ({ date: point.tradeDate, amount: point.amount })),
+      returnHistory: (returnHistory.get(item.code) ?? []).map((point) => ({ date: point.tradeDate, pctChange: point.pctChange })),
     }));
     return json(response, 200, {
       items: enriched,
@@ -121,10 +217,88 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
     return json(response, 200, { dates, latest: dates[0] ?? null });
   }
 
+  if (request.method === "GET" && url.pathname === "/api/convertible-bonds") {
+    const requestedView = url.searchParams.get("view") ?? "all";
+    if (!new Set(["all", "upcoming", "latest"]).has(requestedView)) {
+      return json(response, 400, { code: "BAD_BOND_VIEW", message: "view 仅支持 all、upcoming 或 latest", requestId });
+    }
+    const requestedPage = Number(url.searchParams.get("page") || 1);
+    const requestedPageSize = Number(url.searchParams.get("page_size") || 50);
+    const requestedSort = url.searchParams.get("sort")?.trim() ?? "";
+    if (requestedSort && !isConvertibleBondSort(requestedSort)) {
+      return json(response, 400, { code: "BAD_BOND_SORT", message: "sort 不支持该转债列表字段", requestId });
+    }
+    return json(response, 200, await getConvertibleBonds({
+      view: requestedView as ConvertibleBondView,
+      query: url.searchParams.get("q") ?? "",
+      sort: requestedSort || undefined,
+      page: Number.isFinite(requestedPage) ? requestedPage : 1,
+      pageSize: Number.isFinite(requestedPageSize) ? requestedPageSize : 50,
+      signal: AbortSignal.timeout(15_000),
+    }));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/daily-candidates") {
+    const date = url.searchParams.get("date");
+    if (date !== null && !isRealCalendarDate(date)) return json(response, 400, { code: "BAD_DATE", message: "date 必须是有效日历日期 YYYY-MM-DD", requestId });
+    const snapshot = await buildRadarSnapshot(watchlist);
+    if (shouldServeLiveDailyPreview(date, snapshot.tradeDate, new Date())) {
+      const preview = await buildDailyCandidatePreviewFromRadar(watchlist);
+      return json(response, 200, { ...preview, outcomes: [] });
+    }
+    if (date === null) {
+      const sameDate = getDailyCandidateList(snapshot.tradeDate);
+      if (sameDate) return json(response, 200, {
+        ...sameDate,
+        items: withNextTradingDayTrends(sameDate.tradeDate, withFrozenBenchmarkIndustryLabels(sameDate)),
+        outcomes: getDailyCandidateOutcomes(snapshot.tradeDate),
+        ...(sameDate.items.length ? {} : { liveFocusItems: buildLiveFocusFallback(snapshot) }),
+      });
+      const preview = await buildDailyCandidatePreviewFromRadar(watchlist);
+      return json(response, 200, { ...preview, outcomes: [] });
+    }
+    const list = getDailyCandidateList(date);
+    if (!list) {
+      if (date === snapshot.tradeDate) {
+        const preview = await buildDailyCandidatePreviewFromRadar(watchlist);
+        return json(response, 200, { ...preview, outcomes: [] });
+      }
+      return json(response, 404, { code: "NO_CANDIDATE_LIST_FOR_DATE", message: `交易日（${date}）没有冻结或重建的每日候选记录`, requestId });
+    }
+    // Outcomes are immutable, per-candidate audit records.  Including them preserves the
+    // list's original status/origin while allowing the UI to explain observing/unavailable T+3.
+    return json(response, 200, {
+      ...list,
+      items: withNextTradingDayTrends(list.tradeDate, withFrozenBenchmarkIndustryLabels(list)),
+      outcomes: getDailyCandidateOutcomes(date),
+      ...(date === snapshot.tradeDate && list.items.length === 0 ? { liveFocusItems: buildLiveFocusFallback(snapshot) } : {}),
+    });
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/daily-focus-pool") {
+    const rawSessions = url.searchParams.get("sessions") ?? "5";
+    if (!new Set(["2", "3", "4", "5"]).has(rawSessions)) return json(response, 400, { code: "BAD_FOCUS_POOL_WINDOW", message: "sessions 仅支持 2、3、4 或 5", requestId });
+    const windowSessions = Number(rawSessions) as DailyFocusPoolWindowSessions;
+    const snapshot = await buildRadarSnapshot(watchlist);
+    const stored = getDailyCandidateList(snapshot.tradeDate);
+    const live = stored?.status === "frozen" ? null : await buildDailyCandidatePreviewFromRadar(watchlist);
+    return json(response, 200, getDailyFocusPool(windowSessions, live ? { tradeDate: live.tradeDate, items: live.items } : null));
+  }
+
+  if (request.method === "GET" && url.pathname === "/api/daily-candidates/performance") {
+    const rawWindow = url.searchParams.get("window") ?? "20";
+    if (rawWindow !== "20" && rawWindow !== "60") return json(response, 400, { code: "BAD_WINDOW", message: "window 必须是 20 或 60", requestId });
+    const rawCostBps = url.searchParams.get("cost_bps") ?? "0";
+    const costBps = Number(rawCostBps);
+    if (!Number.isSafeInteger(costBps) || costBps < 0 || costBps > 1_000) return json(response, 400, { code: "BAD_COST_BPS", message: "cost_bps 必须是 0–1000 的整数", requestId });
+    return json(response, 200, getDailyCandidatePerformance(Number(rawWindow) as 20 | 60, costBps));
+  }
+
   const stockMatch = url.pathname.match(/^\/api\/stocks\/(\d{6})$/);
   if (request.method === "GET" && stockMatch) {
     const snapshot = await buildRadarSnapshot(watchlist);
-    const item = snapshot.stocks.find((candidate) => candidate.code === stockMatch[1]);
+    const enrichedStocks = enrichStocksWithIndustry(snapshot.stocks, snapshot, snapshot.events, snapshot.asOf);
+    const item = enrichedStocks.find((candidate) => candidate.code === stockMatch[1]);
     if (!item) return json(response, 404, { code: "STOCK_NOT_FOUND", message: "全市场股票池中未找到该股票", requestId });
     const history = await ensureDailyHistory(item.code, snapshot.tradeDate, item.name);
     return json(response, 200, {
@@ -252,13 +426,9 @@ async function systemStatus(force: boolean) {
   const lastSync = snapshot?.clueAsOf ?? null;
   const partial = Boolean(snapshot) && (Boolean(snapshot?.marketStale) || Boolean(snapshot?.clueFailures.length));
   const historyState = getProviderState("eastmoney_kline");
-  const discussionSources = snapshot?.discussionSources ?? [
-    { id: "eastmoney-guba" as const, name: "东方财富股吧", state: "degraded" as const, detail: "尚未完成首次同步", count: 0 },
-    { id: "eastmoney-guba-replies" as const, name: "东方财富股吧评论", state: "degraded" as const, detail: "尚未完成首次同步", count: 0 },
-    { id: "xueqiu" as const, name: "雪球讨论", state: "disabled" as const, detail: "需要用户提供合法会话；未配置", count: 0 },
-    { id: "weibo" as const, name: "微博讨论", state: "disabled" as const, detail: "需要本机浏览器；未配置", count: 0 },
-    { id: "ths-circle" as const, name: "同花顺圈子", state: "disabled" as const, detail: "等待平台授权数据接口", count: 0 },
-  ];
+  const fallbackDiscussionSources = defaultDiscussionSources();
+  const byId = new Map((snapshot?.discussionSources ?? []).map((source) => [source.id, source]));
+  const discussionSources = fallbackDiscussionSources.map((source) => byId.get(source.id) ?? source);
   return {
     mode: snapshot ? (partial ? "partial" : "live") : "unavailable",
     snapshotAsOf: snapshot?.asOf ?? new Date().toISOString(),
@@ -414,8 +584,13 @@ function stockNameInitials(name: string): string {
   return initials;
 }
 
+function parseIndustryHorizon(value: string | null): 1 | 3 | 5 | 10 | undefined {
+  const parsed = Number(value);
+  return parsed === 1 || parsed === 3 || parsed === 5 || parsed === 10 ? parsed : undefined;
+}
+
 /**
- * 排序键：alert 异动分、direction 方向分（正）、risk 方向分（负）、attention
+ * 排序键：alert 异动分、direction 文本方向（正）、risk 文本方向（负）、attention
  * 讨论热度、consensus 观点共识、mentions 关联线索、pct 实时涨跌、market 市场表现。
  * 前缀 "-" 表示升序（小→大），默认降序。alert 的自选股优先不随方向反转。
  */
@@ -423,19 +598,77 @@ function compareStocks(a: StockSnapshot, b: StockSnapshot, sort: string) {
   const ascending = sort.startsWith("-");
   const key = ascending ? sort.slice(1) : sort;
   let result: number;
-  if (key === "direction") result = (b.radarScore ?? -1) - (a.radarScore ?? -1);
+  if (key === "direction") result = (b.textDirectionScore ?? -1) - (a.textDirectionScore ?? -1);
   else if (key === "amount") result = b.amount - a.amount;
   else if (key === "attention") result = b.factors.attention - a.factors.attention;
   else if (key === "consensus") result = b.factors.consensus - a.factors.consensus;
   else if (key === "mentions") result = b.mentionCount - a.mentionCount;
   else if (key === "pct") result = b.pctChange - a.pctChange;
-  else if (key === "risk") result = (a.radarScore ?? 101) - (b.radarScore ?? 101);
+  else if (key === "risk") result = (a.textDirectionScore ?? 101) - (b.textDirectionScore ?? 101);
+  else if (key === "industry_heat") result = (b.industryPulse?.textHeat ?? -1) - (a.industryPulse?.textHeat ?? -1);
   else if (key === "market") result = b.price * b.pctChange - a.price * a.pctChange;
   else {
     if (a.isWatchlisted !== b.isWatchlisted) return a.isWatchlisted ? -1 : 1;
     result = (b.alertScore ?? -1) - (a.alertScore ?? -1);
   }
   return ascending ? -result : result;
+}
+
+function enrichStocksWithIndustry(
+  stocks: StockSnapshot[],
+  snapshot: { events: SentimentEvent[]; asOf: string; clueAsOf: string; tradeDate: string },
+  events: SentimentEvent[],
+  asOf: string,
+  analytics = buildIndustryAnalytics({ stocks, events, asOf, clueAsOf: snapshot.clueAsOf, tradeDate: snapshot.tradeDate }),
+): StockSnapshot[] {
+  const pulseByCode = new Map(analytics.items.map((pulse) => [pulse.profile.code, pulse]));
+  const contributionByCode = new Map(analytics.stocks.map((item) => [item.code, item]));
+  return stocks.map((stock) => {
+    // 行情供应商未返回行业字段时，使用可解释的内置规则补齐当前快照的行业归属。
+    // 这不是把今天的行业分类回填到历史行情：asOf 仍然绑定在当前快照时间上。
+    const classifiedIndustry = stock.industry ?? classifyStockIndustry(stock);
+    const industryCode = classifiedIndustry?.code;
+    const pulse = industryCode ? pulseByCode.get(industryCode) : undefined;
+    const contribution = contributionByCode.get(stock.code);
+    return {
+      ...stock,
+      ...(classifiedIndustry
+        ? { industry: { ...classifiedIndustry, asOf: stock.industry?.asOf ?? asOf } }
+        : {}),
+      ...(pulse ? { industryPulse: toIndustryPulseSummary(pulse, stock.industry?.asOf ?? asOf) } : {}),
+      ...(contribution ? {
+        industryAttribution: {
+          industryReturn: contribution.industryReturn,
+          marketReturn: contribution.marketReturn,
+          marketExcess: contribution.marketExcess,
+          industryPart: contribution.industryPart,
+          stockSpecificPart: contribution.stockSpecificPart,
+          state: contribution.state,
+        },
+      } : {}),
+    };
+  });
+}
+
+function toIndustryPulseSummary(pulse: ReturnType<typeof buildIndustryAnalytics>["items"][number], asOf: string) {
+  return {
+    ...pulse,
+    profile: { ...pulse.profile, asOf },
+  };
+}
+
+function withIndustryDashboard(dashboard: DashboardData, snapshot: { stocks: StockSnapshot[]; events: SentimentEvent[]; asOf: string; clueAsOf: string; tradeDate: string }): DashboardData {
+  const analytics = buildIndustryAnalytics(snapshot);
+  const enriched = enrichStocksWithIndustry(snapshot.stocks, snapshot, snapshot.events, snapshot.asOf, analytics);
+  const byCode = new Map(enriched.map((stock) => [stock.code, stock]));
+  return {
+    ...dashboard,
+    hotIndustries: analytics.items
+      .filter((pulse) => pulse.textHeat >= 70 && (pulse.relation === "舆情交易双热" || pulse.relation === "舆情升温、价格未确认"))
+      .slice(0, 8)
+      .map((pulse) => toIndustryPulseSummary(pulse, snapshot.asOf)),
+    watchlist: dashboard.watchlist.map((stock) => byCode.get(stock.code) ?? stock),
+  };
 }
 
 /** 仅放行本机回环地址，用于信任命令行导入的接口。 */
@@ -469,6 +702,12 @@ function parsePushedXueqiuClue(raw: unknown): { id: string; source: string; sour
     stockCodes,
     interactionCount: Number.isFinite(interactionCount) && interactionCount > 0 ? Math.trunc(interactionCount) : 0,
   };
+}
+
+function isRealCalendarDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const date = new Date(`${value}T00:00:00.000Z`);
+  return Number.isFinite(date.valueOf()) && date.toISOString().slice(0, 10) === value;
 }
 
 function json(response: ServerResponse, status: number, payload: unknown) {  response.writeHead(status, {
@@ -506,6 +745,49 @@ async function serveStatic(response: ServerResponse, pathname: string) {
   }
 }
 
-server.listen(port, host, () => {
-  console.log(`潮汐接口服务已启动：http://${host}:${port}`);
+let shuttingDown = false;
+
+async function shutdown(reason: string, exitCode: number): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  process.exitCode = exitCode;
+  console.log(`潮汐接口服务正在退出（${reason}）…`);
+
+  stopScheduledRefresh();
+  // 先立即断开 HTTP 长连接，确保监听端口不被请求拖住。
+  server.closeIdleConnections?.();
+  server.closeAllConnections?.();
+
+  const cleanup = Promise.allSettled([
+    new Promise<void>((resolve) => {
+      if (!server.listening) return resolve();
+      server.close(() => resolve());
+    }),
+    stopWeiboLiveSession(),
+    stopXueqiuLiveSession(),
+  ]);
+
+  // 浏览器上下文关闭有自己的超时；进程退出最多等待 1 秒，避免 tsx watch 再次强杀。
+  await Promise.race([
+    cleanup,
+    new Promise<void>((resolve) => setTimeout(resolve, 1_000)),
+  ]);
+  process.exit(exitCode);
+}
+
+process.once("SIGINT", () => void shutdown("SIGINT", 0));
+process.once("SIGTERM", () => void shutdown("SIGTERM", 0));
+
+server.once("error", (error) => {
+  const code = error instanceof Error && "code" in error ? String((error as NodeJS.ErrnoException).code) : "UNKNOWN";
+  console.error(`潮汐接口服务启动失败（${code}）：${error instanceof Error ? error.message : String(error)}`);
+  void shutdown("server-error", 1);
 });
+
+if (process.env.TIDE_DISABLE_LISTEN !== "1") {
+  server.listen(port, host, () => {
+    console.log(`潮汐接口服务已启动：http://${host}:${port}`);
+    // 只有端口成功绑定后才启动后台抓取，避免启动失败时仍然拉起 Chrome/网络任务。
+    startScheduledRefresh();
+  });
+}

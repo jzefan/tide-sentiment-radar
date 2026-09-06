@@ -1,11 +1,13 @@
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { AppShell } from "./components/AppShell";
 import { RadarPage } from "./pages/RadarPage";
-import { ScreenerPage } from "./pages/ScreenerPage";
 import { SourcesPage } from "./pages/SourcesPage";
 import { StockPage } from "./pages/StockPage";
 import { WatchlistPage } from "./pages/WatchlistPage";
+
+// Keep the large screener/daily-focus audit UI out of the initial radar bundle.
+const ScreenerPage = lazy(async () => ({ default: (await import("./pages/ScreenerPage")).ScreenerPage }));
 
 export default function App() {
   const location = useLocation();
@@ -18,7 +20,7 @@ export default function App() {
     <Routes>
       <Route element={<AppShell />}>
         <Route index element={<RadarPage />} />
-        <Route path="screener" element={<ScreenerPage />} />
+        <Route path="screener" element={<Suspense fallback={null}><ScreenerPage /></Suspense>} />
         <Route path="watchlist" element={<WatchlistPage />} />
         <Route path="stocks/:code" element={<StockPage />} />
         <Route path="sources" element={<SourcesPage />} />

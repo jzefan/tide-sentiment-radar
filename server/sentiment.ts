@@ -150,7 +150,8 @@ export function classifyText(text: string): TextClassification {
 
   const score = clamp(Math.round(sum * 18), -100, 100);
   const tone = decideTone(score, positiveEvidence, negativeEvidence);
-  const eventType = CATEGORY_WORDS.find(([, words]) => words.some((word) => normalized.includes(word)))?.[0] ?? "行业";
+  // 无法识别时保持“未分类”，不能把未知文本默认算成行业信息。
+  const eventType = CATEGORY_WORDS.find(([, words]) => words.some((word) => normalized.includes(word)))?.[0] ?? "未分类";
   const confidence = Math.min(94, 46 + (hits.length + topics.length) * 7 + Math.min(12, Math.abs(score) / 10));
 
   return { tone, score, confidence, eventType, keywords: [...keywords].slice(0, 7), topics };

@@ -97,6 +97,91 @@ export function Sparkline({ values, tone = "positive" }: { values: number[]; ton
   );
 }
 
+/** 可读的五日成交额柱图：高度表达相对成交额，标签保留精确数量。 */
+export function AmountTrendChart({
+  values,
+}: {
+  values: Array<{ label: string; amount: number }>;
+}) {
+  if (!values.length) return <span className="text-xs text-muted-foreground">近 5 日成交记录不足</span>;
+  const max = Math.max(1, ...values.map((point) => point.amount));
+  return (
+    <div className="daily-focus-amount-chart" role="img" aria-label={`最近 ${values.length} 个交易日成交额趋势`}>
+      {values.map((point, index) => {
+        const latest = index === values.length - 1;
+        return (
+          <div className="daily-focus-amount-bar" key={`${point.label}-${index}`}>
+            <span className="daily-focus-amount-value">{(point.amount / 1e8).toFixed(2)}亿</span>
+            <i
+              aria-hidden="true"
+              className={cn("daily-focus-amount-column", latest ? "bg-up" : "bg-foreground/25")}
+              style={{ height: `${Math.max(12, (point.amount / max) * 100)}%` }}
+            />
+            <span className="daily-focus-amount-label">{point.label.slice(5)}</span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+/**
+ * 近一月累计涨幅缩略图。虚线是对已发生涨跌幅作的线性统计延长，
+ * 仅帮助识别斜率，不是未来价格预测。
+ */
+export function ReturnTrendSparkline({
+  history,
+}: {
+  history: Array<{ date: string; pctChange: number }>;
+}) {
+  const cumulative = history.reduce<number[]>((values, point) => {
+    const previous = values.at(-1) ?? 0;
+    values.push((1 + previous / 100) * (1 + point.pctChange / 100) * 100 - 100);
+    return values;
+  }, []);
+  if (cumulative.length < 2) return null;
+
+  const width = 96;
+  const height = 28;
+  const padding = 2;
+  const count = cumulative.length;
+  const meanX = (count - 1) / 2;
+  const meanY = cumulative.reduce((sum, value) => sum + value, 0) / count;
+  const variance = cumulative.reduce((sum, _, index) => sum + (index - meanX) ** 2, 0);
+  const covariance = cumulative.reduce((sum, value, index) => sum + (index - meanX) * (value - meanY), 0);
+  const slope = variance ? covariance / variance : 0;
+  const intercept = meanY - slope * meanX;
+  const extensionSteps = Math.min(5, Math.max(2, Math.round(count / 5)));
+  const fitted = Array.from({ length: count + extensionSteps }, (_, index) => intercept + slope * index);
+  const domain = [...cumulative, ...fitted, 0];
+  const min = Math.min(...domain);
+  const max = Math.max(...domain);
+  const range = max - min || 1;
+  const x = (index: number) => padding + (index / Math.max(1, fitted.length - 1)) * (width - padding * 2);
+  const y = (value: number) => padding + height - padding * 2 - ((value - min) / range) * (height - padding * 2);
+  const actualPath = cumulative.map((value, index) => `${index === 0 ? "M" : "L"}${x(index).toFixed(1)},${y(value).toFixed(1)}`).join(" ");
+  const fitPath = fitted.slice(count - 1).map((value, index) => {
+    const pointIndex = count - 1 + index;
+    return `${index === 0 ? "M" : "L"}${x(pointIndex).toFixed(1)},${y(value).toFixed(1)}`;
+  }).join(" ");
+  const baseline = y(0);
+  const end = cumulative.at(-1) ?? 0;
+
+  return (
+    <svg
+      viewBox={`0 0 ${width} ${height}`}
+      preserveAspectRatio="none"
+      role="img"
+      aria-label={`近一月累计涨幅${end >= 0 ? "+" : ""}${end.toFixed(2)}%，虚线为历史统计延长线`}
+      className="h-7 w-full min-w-[72px]"
+    >
+      <line x1={padding} x2={width - padding} y1={baseline} y2={baseline} className="stroke-border" strokeWidth="1" strokeDasharray="2 3" />
+      <path d={actualPath} fill="none" strokeWidth="1.7" strokeLinecap="round" className={end >= 0 ? "stroke-up" : "stroke-down"} />
+      <path d={fitPath} fill="none" strokeWidth="1.25" strokeLinecap="round" strokeDasharray="3 3" className="stroke-foreground/50" />
+    </svg>
+  );
+}
+
 export function FactorBars({ factors }: { factors: ScoreFactors }) {
   const rows = [
     ["情绪方向", Math.abs(factors.sentiment), factors.sentiment >= 0 ? "bg-up" : "bg-down", `${factors.sentiment > 0 ? "+" : ""}${factors.sentiment}`],
