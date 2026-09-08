@@ -175,7 +175,7 @@ async function main() {
   --quit                                   自动退出浏览器后继续（不询问）
   --no-reopen                              读取后不重新打开浏览器
   --dry-run                                只检测目标浏览器与会话，不退出、不读取
-  --port <端口>                            本地服务端口（默认 8787）
+  --port <端口>                            本地服务端口（默认 8788）
 `);
     return;
   }
@@ -184,7 +184,7 @@ async function main() {
   const quitFlag = flag(args, "--quit");
   const noReopen = flag(args, "--no-reopen");
   const dryRun = flag(args, "--dry-run");
-  const apiPort = value(args, "--port") ?? process.env.API_PORT ?? "8787";
+  const apiPort = value(args, "--port") ?? process.env.API_PORT ?? "8788";
 
   const installed = BROWSERS.filter((target) => existsSync(target.executablePath));
   if (browserKey && !installed.some((target) => target.key === browserKey)) {

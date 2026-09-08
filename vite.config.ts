@@ -15,7 +15,8 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/api": "http://127.0.0.1:8787",
+      // 与 server/index.ts 的 API_PORT 默认值保持一致
+      "/api": `http://127.0.0.1:${process.env.API_PORT || "8788"}`,
     },
   },
 });

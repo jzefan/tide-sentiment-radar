@@ -33,8 +33,8 @@ export function SourcesPage() {
   const [xueqiuDialogOpen, setXueqiuDialogOpen] = useState(false);
   const [discussionDrawerOpen, setDiscussionDrawerOpen] = useState(false);
   const [discussionSource, setDiscussionSource] = useState<{ id: DiscussionSourceId; name: string } | null>(null);
-  /** 地址栏导入代码需要直达后端端口：dev 为 8787，生产同端口。 */
-  const apiPort = import.meta.env.DEV ? "8787" : window.location.port || "8787";
+  /** 地址栏导入代码需要直达后端端口：dev 为 8788，生产同端口。 */
+  const apiPort = import.meta.env.DEV ? "8788" : window.location.port || "8788";
   const requestController = useRef<AbortController | null>(null);
 
   const load = async (refresh = false) => {

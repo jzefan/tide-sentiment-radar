@@ -119,7 +119,7 @@ echo "[deploy] 本机同步令牌（复制到本机 .env 的 XUEQIU_SYNC_TOKEN�
 # ---------------------------------------------------------------- 启动服务
 say "重启服务……"
 # 关键：服务端不自动加载 .env，这里用 set -a 把 .env 里的变量导入进程环境，
-# 否则 API_PORT 不生效，服务会回落到默认端口 8787，健康检查就会失败。
+# 否则 API_PORT 不生效，服务会回落到默认端口 8788，健康检查就会失败。
 # pkill 兜底：防止 server.pid 失效时旧进程没被杀掉、新进程起不来（端口被旧进程占用）。
 remote "cd $REMOTE_DIR && [ -f server.pid ] && kill \$(cat server.pid) 2>/dev/null || true; pkill -f 'server/index\.ts\$' 2>/dev/null || true; sleep 1; $REMOTE_ENV; set -a; [ -f .env ] && . ./.env; set +a; nohup ./node_modules/.bin/tsx server/index.ts > tide.log 2>&1 & echo \$! > server.pid" \
   || fail "服务启动失败。"

@@ -76,7 +76,7 @@ async function resolveCodes(serverUrl: string): Promise<string[]> {
 async function main() {
   loadLocalEnv();
 
-  const serverUrl = (process.env.XUEQIU_SERVER_URL || "http://127.0.0.1:8787").replace(/\/+$/, "");
+  const serverUrl = (process.env.XUEQIU_SERVER_URL || "http://127.0.0.1:8788").replace(/\/+$/, "");
   const token = process.env.XUEQIU_SYNC_TOKEN?.trim();
   if (!token) {
     fail("未设置 XUEQIU_SYNC_TOKEN。请将其设为与服务器 .env 中 XUEQIU_SYNC_TOKEN 相同的值（deploy.sh 部署后会回显该令牌）。");

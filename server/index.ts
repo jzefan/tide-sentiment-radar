@@ -20,7 +20,7 @@ import { getDailyFocusPool } from "./dailyFocusPoolService.ts";
 import type { DailyFocusPoolWindowSessions } from "./dailyFocusPool.ts";
 
 loadXueqiuCookie();
-const port = Number(process.env.API_PORT || 8787);
+const port = Number(process.env.API_PORT || 8788);
 // 绑定 0.0.0.0 以便从外部（浏览器）访问；如只需本机访问，可设 API_HOST=127.0.0.1
 const host = process.env.API_HOST || "0.0.0.0";
 const root = fileURLToPath(new URL("..", import.meta.url));
