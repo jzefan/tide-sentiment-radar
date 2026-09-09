@@ -734,8 +734,8 @@ export function ScreenerPage() {
               </SelectTrigger>
               <SelectContent>
                 <SelectItem value="alert">自选优先，其次异动分</SelectItem>
-                <SelectItem value="direction">文本方向偏正面</SelectItem>
-                <SelectItem value="risk">文本方向偏负面</SelectItem>
+                <SelectItem value="direction">情绪方向偏正面</SelectItem>
+                <SelectItem value="risk">情绪方向偏负面</SelectItem>
                 <SelectItem value="attention">讨论热度</SelectItem>
                 <SelectItem value="mentions">关联线索数</SelectItem>
                 <SelectItem value="pct">涨跌幅</SelectItem>
@@ -828,7 +828,7 @@ export function ScreenerPage() {
           </span>
           <span className="flex items-start gap-2 text-xs text-muted-foreground">
             <i className="mt-1.5 size-1.5 shrink-0 rounded-full bg-warning" />
-            文本方向以 50 为中性（50+ 偏正面 / 50− 偏负面）；异动分 = 讨论增速
+            情绪方向以 50 为中性（50+ 偏正面 / 50− 偏负面）；异动分 = 讨论增速
             35% + 互动热度 25% + 来源质量 20% + 情绪位移
             20%，用于发现变化，不代表上涨概率。
           </span>
@@ -907,7 +907,7 @@ export function ScreenerPage() {
                         onSort={toggleSort}
                       />
                       <SortableTh
-                        label="文本方向"
+                        label="情绪方向"
                         sortKey="direction"
                         sort={sort}
                         onSort={toggleSort}
@@ -2493,7 +2493,7 @@ function LiveFocusFallback({ items }: { items: DailyFocusLiveItemResponse[] }) {
       <div className="daily-focus-columns" aria-hidden="true">
         <span>名次 / 标的</span>
         <span>盘中评分</span>
-        <span>文本方向</span>
+        <span>情绪方向</span>
         <span>讨论热度</span>
         <span>行情 / 行业</span>
         <span />
@@ -2518,7 +2518,7 @@ function LiveFocusFallback({ items }: { items: DailyFocusLiveItemResponse[] }) {
             </strong>
             <strong className="daily-focus-score">
               {item.textDirection ?? "—"}
-              <small>文本方向</small>
+              <small>情绪方向</small>
             </strong>
             <span className="daily-focus-signal">
               <b>{item.discussionCount}</b>
@@ -2671,7 +2671,7 @@ function DailyFocusCandidate({
         <span className="daily-focus-signal">
           <b>{textDirection ?? "—"}</b>
           <small>
-            文本方向 · 讨论 {discussion ?? "—"}
+            情绪方向 · 讨论 {discussion ?? "—"}
             {mentionDelta === null
               ? ""
               : ` · 增量 ${mentionDelta >= 0 ? "+" : ""}${mentionDelta}`}
@@ -2943,7 +2943,7 @@ function RawSnapshot({
     ["高", asNumber(snapshot.high)],
     ["低", asNumber(snapshot.low)],
     ["收", asNumber(snapshot.close)],
-    ["文本方向", asNumber(snapshot.textDirection)],
+    ["情绪方向", asNumber(snapshot.textDirection)],
     ["文本置信", asNumber(snapshot.textConfidence)],
   ];
   return (
@@ -3138,7 +3138,7 @@ function PerformanceStrip({
 
 const SCORE_HINTS: Partial<Record<SortBaseKey, string>> = {
   direction:
-    "文本方向以 50 为中性，只读取已关联线索的情绪方向，不读取当日涨跌幅。价情共振分另行描述价格是否配合。",
+    "情绪方向以 50 为中性，只读取已关联线索的情绪方向，不读取当日涨跌幅。价情共振分另行描述价格是否配合。",
 };
 
 function SortableTh({
@@ -3668,7 +3668,7 @@ function CandidateCard({
             </dd>
           </div>
           <div className="text-center">
-            <dt className="text-[10px] text-muted-foreground">文本方向</dt>
+            <dt className="text-[10px] text-muted-foreground">情绪方向</dt>
             <dd className="text-sm font-semibold tabular">
               {stock.textDirectionScore ?? "—"}
             </dd>

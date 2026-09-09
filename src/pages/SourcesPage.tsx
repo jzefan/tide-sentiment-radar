@@ -196,7 +196,7 @@ export function SourcesPage() {
             </div>
             <div className="mt-6 border-t pt-4">
               <span className="text-xs font-medium text-up">价情共振分</span>
-              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">以 50 为中性，结合文本情绪、共识、来源质量、实时涨跌确认与信息时效计算。文本方向分与行情确认分开展示。</p>
+              <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">以 50 为中性，结合文本情绪、共识、来源质量、实时涨跌确认与信息时效计算。情绪方向分与行情确认分开展示。</p>
             </div>
           </CardContent>
         </Card>

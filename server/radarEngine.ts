@@ -393,7 +393,7 @@ export function buildLiveFocusFallback(input: DailyCandidateHistoryContext): Liv
           quote.pctChange > 0 ? "当日上涨" : "成交活跃",
           `成交额 ${(quote.amount / 100_000_000).toFixed(2)} 亿`,
           `成交评分 ${scores.turnover.toFixed(1)} / 30`,
-          stock?.textDirectionScore !== null && stock?.textDirectionScore !== undefined ? `文本方向 ${stock.textDirectionScore}` : "文本方向待补充",
+          stock?.textDirectionScore !== null && stock?.textDirectionScore !== undefined ? `情绪方向 ${stock.textDirectionScore}` : "情绪方向待补充",
         ],
       };
     });

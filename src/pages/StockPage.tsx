@@ -139,7 +139,7 @@ export function StockPage() {
         <div className="flex items-center gap-6">
           <div className="text-center"><p className="text-xs text-muted-foreground">异动分</p><strong className="mt-1 block text-4xl font-semibold tabular">{stock.alertScore ?? "—"}</strong><em className="mt-1 block text-[11px] not-italic text-muted-foreground">变化强度</em></div>
           <div className="h-16 w-px bg-border" />
-          <div className="text-center"><p className="text-xs text-muted-foreground">文本方向</p><strong className={cn("mt-1 block text-4xl font-semibold tabular", (stock.textDirectionScore ?? 50) >= 50 ? "text-up" : "text-down")}>{stock.textDirectionScore ?? "—"}</strong><em className="mt-1 block text-[11px] not-italic text-muted-foreground">{stock.textDirectionScore === null || stock.textDirectionScore === undefined ? "等待有效线索" : "50 为中性"}</em></div>
+          <div className="text-center"><p className="text-xs text-muted-foreground">情绪方向</p><strong className={cn("mt-1 block text-4xl font-semibold tabular", (stock.textDirectionScore ?? 50) >= 50 ? "text-up" : "text-down")}>{stock.textDirectionScore ?? "—"}</strong><em className="mt-1 block text-[11px] not-italic text-muted-foreground">{stock.textDirectionScore === null || stock.textDirectionScore === undefined ? "等待有效线索" : "50 为中性"}</em></div>
         </div>
       </header>
 
@@ -237,7 +237,7 @@ export function StockPage() {
         <Card>
           <CardHeader className="grid-cols-[1fr_auto] grid-rows-1 items-center justify-between">
             <div><p className="text-xs uppercase tracking-[0.16em] text-muted-foreground">评分依据</p><CardTitle className="mt-1 text-lg">因子拆解</CardTitle></div>
-            <p className="hidden text-xs text-muted-foreground sm:block">文本方向只读取线索；价格确认单独进入价情共振。</p>
+            <p className="hidden text-xs text-muted-foreground sm:block">情绪方向只读取线索；价格确认单独进入价情共振。</p>
           </CardHeader>
           <CardContent className="px-6 pb-6">
             {stock.analysisStatus === "scored" ? <FactorBars factors={stock.factors} /> : (

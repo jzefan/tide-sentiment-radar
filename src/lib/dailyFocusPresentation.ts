@@ -39,7 +39,7 @@ export function dailyFocusStatus(
 
 const DIMENSIONS = [
   ["成交趋势", "turnover"],
-  ["文本方向", "direction"],
+  ["情绪方向", "direction"],
   ["讨论升温", "discussion"],
   ["价格确认", "price"],
   ["行业共振", "industry"],

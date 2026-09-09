@@ -25,7 +25,7 @@ export function buildIndustryApiResponse(source: IndustrySource, query: Industry
     items: result.items.map((item) => ({ ...item, profile: { ...item.profile, asOf: source.asOf } })),
     methodology: {
       textHeat: "行业舆情热度只读取独立事件、用户讨论、来源广度、成分股覆盖与线索新鲜度，不读取股票涨跌幅、成交额或行情强度。",
-      textDirection: "行业文本方向只读取线索情绪、来源可信度、分析置信度和线索新鲜度。",
+      textDirection: "行业情绪方向只读取线索情绪、来源可信度、分析置信度和线索新鲜度。",
       marketStrength: "行业行情强度只读取成分股涨跌幅、全市场等权基准、上涨家数比例和成交额占比。",
       relationship: "当前关系是描述性状态；后验仅统计达到热点门槛的信号日（舆情交易双热或舆情升温、价格未确认），T+1、T+3、T+5、T+10结果在各自观察周期完成后生成。",
       dataCutoff: source.clueAsOf ?? source.asOf,

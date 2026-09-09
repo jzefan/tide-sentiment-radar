@@ -189,7 +189,7 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
       );
       return matchesQuery && matchesSignal && matchesMarket && matchesTag && matchesIndustry && matchesHotIndustry;
     });
-    // 全市场口径不做“无分隐藏”：异动分/文本方向排序时无分股票沉底即可，保证始终展示全市场。
+    // 全市场口径不做“无分隐藏”：异动分/情绪方向排序时无分股票沉底即可，保证始终展示全市场。
     items = [...items].sort((a, b) => compareStocks(a, b, sort));
     const total = items.length;
     const start = (page - 1) * pageSize;
@@ -590,7 +590,7 @@ function parseIndustryHorizon(value: string | null): 1 | 3 | 5 | 10 | undefined 
 }
 
 /**
- * 排序键：alert 异动分、direction 文本方向（正）、risk 文本方向（负）、attention
+ * 排序键：alert 异动分、direction 情绪方向（正）、risk 情绪方向（负）、attention
  * 讨论热度、consensus 观点共识、mentions 关联线索、pct 实时涨跌、market 市场表现。
  * 前缀 "-" 表示升序（小→大），默认降序。alert 的自选股优先不随方向反转。
  */

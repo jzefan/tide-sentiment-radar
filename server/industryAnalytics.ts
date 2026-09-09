@@ -238,7 +238,7 @@ function buildPulse(group: InternalGroup, source: IndustrySource, marketReturn: 
   const amountTotal = source.stocks.reduce((sum, stock) => sum + Math.max(0, stock.amount), 0);
   const amountShare = amountTotal ? group.stocks.reduce((sum, stock) => sum + Math.max(0, stock.amount), 0) / amountTotal : 0;
   // 行情强度只描述已发生的价格/流动性：成交额占比作为小权重确认项，
-  // 不进入文本热度或文本方向，避免循环论证。
+  // 不进入文本热度或情绪方向，避免循环论证。
   const marketStrength = clamp(Math.round(50 + marketExcess * 9 + (breadth - 0.5) * 45 + Math.min(8, amountShare * 0.2)));
   const textHeat = Math.max(0, Math.min(100, normalizedHeat));
   const textHot = textHeat >= 70 && independentEvents >= 3 && sourceCount >= 2 && stockCoverage >= 3;

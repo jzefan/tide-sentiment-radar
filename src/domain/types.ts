@@ -99,7 +99,7 @@ export interface IndustryAttributionSummary {
 
 /** 每日舆情快照：某交易日某只股票的线索聚合结果（用于历史异动回看，不含行情字段）。 */
 export interface DailySentimentSnapshot {
-  /** 纯文本方向，不读取当日行情；用于检验舆情与未来收益的关系。 */
+  /** 纯情绪方向，不读取当日行情；用于检验舆情与未来收益的关系。 */
   textDirectionScore?: number | null;
   radarScore: number | null;
   alertScore: number | null;
