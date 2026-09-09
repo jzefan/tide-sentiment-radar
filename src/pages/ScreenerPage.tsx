@@ -2420,7 +2420,7 @@ function DailyFocusPanel({
                 <span>名次 / 标的</span>
                 <span>入选强度</span>
                 <span>总分</span>
-                <span>文本 / 讨论</span>
+                <span>情绪 / 讨论</span>
                 <span>行情 / 次日趋势</span>
                 <span />
               </div>
