@@ -17,10 +17,10 @@ const REPLIES_PER_POST = 10;
 const GUBA_CONCURRENCY = 4;
 
 /**
- * 临时开关：暂不抓取雪球讨论（按用户要求，2026-08-19）。
- * 需要恢复时改为 true 即可（无需改其他代码，既有会话机制原样保留）。
+ * 雪球抓取开关：默认开启（按股票名全站关键词搜索 + 个股时间线，覆盖全池+轮转+去重）。
+ * 如需彻底停用，改为 false 即可（既有会话机制原样保留，仅在 resolveXueqiu 处关闭）。
  */
-const XUEQIU_FETCH_ENABLED = false;
+const XUEQIU_FETCH_ENABLED = true;
 
 export interface DiscussionSourceState {
   id: "eastmoney-guba" | "eastmoney-guba-replies" | "xueqiu" | "weibo" | "ths-circle";
@@ -82,11 +82,11 @@ async function buildUserDiscussionBundle(codes: string[], names?: Map<string, st
 
   diagLog("discussion", "bundle 开始", codes.length, "只");
   const bundleAt = Date.now();
-  // 三条讨论源并行：股吧（帖子+评论）、微博（关键词搜索）、雪球（真浏览器会话）。
+  // 三条讨论源并行：股吧（帖子+评论）、微博（关键词搜索）、雪球（真浏览器会话 + 股票名关键词搜索）。
   const [guba, weibo, xueqiu] = await Promise.allSettled([
     fetchEastMoneyGubaAllMarket(codes),
     resolveWeibo(codes, names),
-    resolveXueqiu(codes),
+    resolveXueqiu(codes, names),
   ]);
   diagLog("discussion", `bundle 完成 ${(Date.now() - bundleAt) / 1000}s`, `guba=${guba.status}`, `weibo=${weibo.status}`, `xueqiu=${xueqiu.status}`);
   const items: RawClue[] = [];
@@ -143,7 +143,7 @@ async function buildUserDiscussionBundle(codes: string[], names?: Map<string, st
  * 解析雪球来源：优先本机会话直抓；不可用（无 cookie / 无浏览器 / 被 WAF 拦）时，
  * 回退到「本机同步推送」的数据。返回线索、来源状态与是否计入失败列表。
  */
-async function resolveXueqiu(codes: string[]): Promise<{ items: RawClue[]; source: DiscussionSourceState; failure: boolean }> {
+async function resolveXueqiu(codes: string[], names?: Map<string, string>): Promise<{ items: RawClue[]; source: DiscussionSourceState; failure: boolean }> {
   if (!XUEQIU_FETCH_ENABLED) {
     // 暂时停用：关闭常驻浏览器会话（释放资源），不展示推送数据。
     void stopXueqiuLiveSession();
@@ -157,11 +157,11 @@ async function resolveXueqiu(codes: string[]): Promise<{ items: RawClue[]; sourc
   const hasCookie = Boolean(getXueqiuCookie());
   if (hasCookie && isXueqiuBrowserAvailable()) {
     try {
-      const live = await fetchXueqiu(codes.slice(0, 20));
+      const live = await fetchXueqiu(codes, names);
       if (live.length) {
         return {
           items: live,
-          source: { id: "xueqiu", name: "雪球讨论", state: "connected", detail: "使用用户自行提供的合法会话读取重点股票讨论", count: live.length },
+          source: { id: "xueqiu", name: "雪球讨论", state: "connected", detail: "使用用户自行提供的合法会话按股票名检索雪球全站讨论", count: live.length },
           failure: false,
         };
       }
@@ -594,18 +594,41 @@ async function fetchGubaRepliesForPost(post: GubaPostMeta): Promise<RawClue[]> {
  */
 /** 单轮雪球抓取的软预算：建立浏览器会话 + 逐股抓取超出后停止，不拖垮整轮快照。 */
 const XUEQIU_CYCLE_BUDGET_MS = 150_000;
+/** 单个关键词/个股的搜索条数上限。 */
+export const XUEQIU_COUNT = 20;
+/** 轮转游标：与微博一致，预算耗尽时多轮也能轮到全部股票。 */
+let xueqiuCursor = 0;
 
-export async function fetchXueqiu(codes: string[]): Promise<RawClue[]> {
+/** 一个雪球检索词：优先股票名称（覆盖跨话题/长文），再以代码时间线兜底。 */
+export interface XueqiuKeywordItem {
+  code: string;
+  symbol: string;
+  keyword: string;
+  kind: "name" | "code";
+}
+
+export async function fetchXueqiu(codes: string[], names?: Map<string, string>): Promise<RawClue[]> {
   if (!XUEQIU_FETCH_ENABLED) return [];
   const cookie = getXueqiuCookie();
   if (!cookie) return [];
-  const items = codes.slice(0, 20).map((code) => ({ code, symbol: toXueqiuSymbol(code) }));
+  // 关键词列表不再截断为前 20：整个股票池都参与，靠轮转游标 + 预算分多轮扫完。
+  // 每只股票两种形态：名称（全站关键词搜索，覆盖话题/长文提及）+ 代码（个股时间线，覆盖个股讨论）。
+  const items: XueqiuKeywordItem[] = codes.flatMap((code): XueqiuKeywordItem[] => {
+    const symbol = toXueqiuSymbol(code);
+    const name = names?.get(code)?.trim() ?? "";
+    const list: XueqiuKeywordItem[] = [];
+    if (name) list.push({ code, symbol, keyword: name, kind: "name" });
+    list.push({ code, symbol, keyword: code, kind: "code" });
+    return list;
+  });
+  if (!items.length) return [];
   const deadline = Date.now() + XUEQIU_CYCLE_BUDGET_MS;
   // 优先确保有可用的真浏览器会话：常驻窗口在则复用，否则用保存的 Cookie 注入
   // 新开的 Chromium 建立会话（带冷却与总超时，失败时不反复开窗、不阻塞服务）。
   if (isXueqiuLiveReady() || (await ensureXueqiuLiveSession(cookie))) {
     try {
-      return await fetchXueqiuViaBrowser(items, deadline);
+      const live = await fetchXueqiuViaBrowser(items, deadline);
+      if (live.length) return live;
     } catch (error) {
       // 真浏览器抓取失败（挑战页/页面关闭）：回退到本地 Cookie 直连。
       console.warn("[xueqiu] 真浏览器抓取失败，回退本地 Cookie 直连：", safeError(error));
@@ -615,102 +638,151 @@ export async function fetchXueqiu(codes: string[]): Promise<RawClue[]> {
 }
 
 /** 6 位代码 → 雪球 symbol（SH/SZ/BJ 前缀）。 */
-function toXueqiuSymbol(code: string): string {
+export function toXueqiuSymbol(code: string): string {
   return `${/^6/.test(code) ? "SH" : /^8|^9|^4/.test(code) ? "BJ" : "SZ"}${code}`;
 }
 
-function xueqiuEndpoints(symbol: string) {
-  // 实测（2026-08）：query/v1/status/stock_timeline 已 404；statuses/stock_timeline
-  // 对当前会话返回 error_code 10020；网页个股页实际调用的讨论搜索接口
-  // query/v1/symbol/search/status.json 在游客会话下即可返回真实讨论，作为主端点。
-  return [
-    { url: `https://xueqiu.com/query/v1/symbol/search/status.json?${new URLSearchParams({ count: "10", comment: "0", symbol, hl: "0", source: "all", sort: "time", q: "", type: "11" })}`, referer: `https://xueqiu.com/S/${symbol}` },
-    { url: `https://xueqiu.com/statuses/stock_timeline.json?${new URLSearchParams({ symbol_id: symbol, page: "1", count: "10" })}`, referer: `https://xueqiu.com/S/${symbol}` },
-  ];
-}
-
-/** 方案 A：在常驻真浏览器页面内逐个股票抓取时间线（超过预算即止，返回已抓部分）。 */
-async function fetchXueqiuViaBrowser(items: Array<{ code: string; symbol: string }>, deadline: number): Promise<RawClue[]> {
-  const batches: RawClue[][] = [];
-  for (const { code, symbol } of items) {
-    if (Date.now() > deadline) break;
-    const endpoints = xueqiuEndpoints(symbol);
-    let rows: Array<Record<string, unknown>> | null = null;
-    let lastError = "个股时间线端点不可用";
-    for (const endpoint of endpoints) {
-      try {
-        const payload = await fetchXueqiuTimelineInBrowser(endpoint.url, endpoint.referer);
-        if (payload.error_description || (payload.code !== undefined && payload.code !== 0)) {
-          lastError = payload.error_description ?? payload.message ?? "雪球会话失效，请重新连接";
-          continue;
-        }
-        rows = payload.list ?? payload.statuses ?? [];
-        break;
-      } catch (error) {
-        const raw = error instanceof Error ? error.message : String(error);
-        // 命中风控挑战页：本轮停止，等待下一周期（不撞墙）。
-        if (raw.includes("CHALLENGE_PAGE")) {
-          throw new Error("雪球返回了风控页面，本轮停止，等待下一周期");
-        }
-        // 页面主线程被风控挑战卡死（evaluate 无响应）：立即停止本轮，并重建会话，
-        // 避免后续每个请求都白等 15 秒，也避免常驻一个卡死的浏览器。
-        if (raw.includes("PAGE_EVALUATE_TIMEOUT")) {
-          await stopXueqiuLiveSession();
-          throw new Error("雪球页面无响应（风控挑战卡死），已重建会话，等待下一周期");
-        }
-        lastError = safeError(error);
-        continue;
-      }
-    }
-    if (rows === null) throw new Error(lastError);
-    batches.push(rows.map((row) => mapXueqiuRow(row, code)).filter((clue): clue is RawClue => clue !== null));
-    await new Promise((resolve) => setTimeout(resolve, 1_200 + Math.floor(Math.random() * 1_000)));
+/**
+ * 单个检索词的候选端点（按顺序尝试，取第一个非空结果）：
+ * - kind=name：先用雪球「全站关键词搜索」query/v1/search/status.json（覆盖话题/长文/自选讨论，
+ *   远大于个股时间线）；返回空时再退回该股 symbol 搜索。
+ * - kind=code：个股时间线（实测 2026-08 可用的主端点）。
+ */
+export function xueqiuEndpointsForKeyword(item: XueqiuKeywordItem): Array<{ url: string; referer: string }> {
+  const base = "https://xueqiu.com/query/v1";
+  const referer = `https://xueqiu.com/S/${item.symbol}`;
+  // 个股时间线（实测 2026-08 可用的主端点）：symbol + q 为空即可返回该股讨论。
+  const perSymbol = {
+    url: `${base}/symbol/search/status.json?${new URLSearchParams({ count: String(XUEQIU_COUNT), comment: "0", symbol: item.symbol, hl: "0", source: "all", sort: "time", q: "", type: "11" })}`,
+    referer,
+  };
+  if (item.kind === "name") {
+    // 全站关键词搜索：query/v1/search/status.json 只需 q/count/page/type 即可命中大量讨论；
+    // 实测带 comment/hl/source/sort 等额外参数会返回空 list，故只用最小参数集。
+    return [
+      { url: `${base}/search/status.json?${new URLSearchParams({ q: item.keyword, count: String(XUEQIU_COUNT), page: "1", type: "11" })}`, referer },
+      perSymbol,
+    ];
   }
-  return batches.flat();
+  return [perSymbol];
 }
 
-/** 方案 B：用本地保存的完整 Cookie 由服务端 Node fetch 直连雪球数据接口（大概率被 WAF 拦）。 */
-async function fetchXueqiuViaCookie(cookie: string, items: Array<{ code: string; symbol: string }>, deadline: number): Promise<RawClue[]> {
+/** 依次尝试一个检索词的候选端点：取第一个非空结果；全部报错则抛错，允许合法但为空的结果。 */
+async function resolveXueqiuItemRows(
+  item: XueqiuKeywordItem,
+  fetchEndpoint: (url: string, referer: string) => Promise<{ code?: number; list?: unknown[]; statuses?: unknown[]; error_description?: string; message?: string }>,
+): Promise<{ rows: unknown[]; error: string | null }> {
+  const endpoints = xueqiuEndpointsForKeyword(item);
+  let firstValidEmpty: unknown[] = [];
+  let hadValid = false;
+  let lastError = "个股时间线端点不可用";
+  for (const endpoint of endpoints) {
+    let payload;
+    try {
+      payload = await fetchEndpoint(endpoint.url, endpoint.referer);
+    } catch (error) {
+      const raw = error instanceof Error ? error.message : String(error);
+      if (raw.includes("CHALLENGE_PAGE")) return { rows: [], error: "CHALLENGE_PAGE" };
+      if (raw.includes("PAGE_EVALUATE_TIMEOUT")) return { rows: [], error: "PAGE_EVALUATE_TIMEOUT" };
+      lastError = safeError(error);
+      continue;
+    }
+    if (payload.error_description || (payload.code !== undefined && payload.code !== 0)) {
+      lastError = payload.error_description ?? payload.message ?? "雪球会话失效，请重新连接";
+      continue;
+    }
+    const rows = payload.list ?? payload.statuses ?? [];
+    hadValid = true;
+    if (rows.length) return { rows, error: null };
+    if (!firstValidEmpty.length) firstValidEmpty = rows;
+  }
+  return { rows: hadValid ? firstValidEmpty : [], error: hadValid ? null : lastError };
+}
+
+/** 名称 + 代码两种形态可能命中同一条帖子：按线索 id 去重后再落库。 */
+function dedupClues(clues: RawClue[]): RawClue[] {
+  const seen = new Set<string>();
+  const out: RawClue[] = [];
+  for (const clue of clues) {
+    if (!seen.has(clue.id)) {
+      seen.add(clue.id);
+      out.push(clue);
+    }
+  }
+  return out;
+}
+
+
+/** 方案 A：在常驻真浏览器页面内按检索词逐个抓取（超过预算即止；轮转游标保证多轮覆盖全部股票）。 */
+async function fetchXueqiuViaBrowser(items: XueqiuKeywordItem[], deadline: number): Promise<RawClue[]> {
   const batches: RawClue[][] = [];
-  for (const { code, symbol } of items) {
+  const cursor = xueqiuCursor % Math.max(items.length, 1);
+  const ordered = [...items.slice(cursor), ...items.slice(0, cursor)];
+  let searched = 0;
+  for (const item of ordered) {
     if (Date.now() > deadline) break;
-    const endpoints = xueqiuEndpoints(symbol);
-    let response: Response | null = null;
-    let lastError = "个股时间线端点不可用";
-    for (const endpoint of endpoints) {
-      const attempt = await fetch(endpoint.url, {
+    searched++;
+    const result = await resolveXueqiuItemRows(item, (url, referer) => fetchXueqiuTimelineInBrowser(url, referer));
+    if (result.error === "CHALLENGE_PAGE") {
+      throw new Error("雪球返回了风控页面，本轮停止，等待下一周期");
+    }
+    if (result.error === "PAGE_EVALUATE_TIMEOUT") {
+      await stopXueqiuLiveSession();
+      throw new Error("雪球页面无响应（风控挑战卡死），已重建会话，等待下一周期");
+    }
+    if (!result.rows.length) continue;
+    batches.push(
+      result.rows
+        .map((row) => mapXueqiuRow(row as Record<string, unknown>, item.code))
+        .filter((clue): clue is RawClue => clue !== null),
+    );
+    // 节流：降低命中雪球风控的频率。
+    await new Promise((resolve) => setTimeout(resolve, 900 + Math.floor(Math.random() * 700)));
+  }
+  xueqiuCursor = (cursor + searched) % Math.max(items.length, 1);
+  return dedupClues(batches.flat());
+}
+
+/** 方案 B：用本地保存的完整 Cookie 由服务端 Node fetch 直连雪球数据接口（大概率被 WAF 拦，作为最终兜底）。 */
+async function fetchXueqiuViaCookie(cookie: string, items: XueqiuKeywordItem[], deadline: number): Promise<RawClue[]> {
+  const batches: RawClue[][] = [];
+  const cursor = xueqiuCursor % Math.max(items.length, 1);
+  const ordered = [...items.slice(cursor), ...items.slice(0, cursor)];
+  let searched = 0;
+  for (const item of ordered) {
+    if (Date.now() > deadline) break;
+    searched++;
+    const result = await resolveXueqiuItemRows(item, async (url, referer) => {
+      const attempt = await fetch(url, {
         headers: {
           accept: "application/json, text/plain, */*",
           cookie,
-          referer: endpoint.referer,
+          referer,
           "x-requested-with": "XMLHttpRequest",
           "user-agent": USER_AGENT,
         },
         signal: AbortSignal.timeout(10_000),
       });
       if (attempt.status === 429) throw new Error("雪球请求过于频繁(429)，本轮停止，等待下一周期");
-      if (!attempt.ok) {
-        lastError = `返回状态 ${attempt.status}`;
-        continue;
-      }
-      response = attempt;
-      break;
-    }
-    if (!response) throw new Error(lastError);
-    const text = await response.text();
-    if (!text.trimStart().startsWith("{")) throw new Error("雪球返回了风控页面，本轮停止，等待下一周期");
-    const payload = JSON.parse(text) as { code?: number; list?: Array<Record<string, unknown>>; statuses?: Array<Record<string, unknown>>; error_description?: string; message?: string };
-    if (payload.error_description || (payload.code !== undefined && payload.code !== 0)) {
-      throw new Error(payload.error_description ?? payload.message ?? "雪球会话失效，请重新连接");
-    }
-    const rows = payload.list ?? payload.statuses ?? [];
-    batches.push(rows.map((row) => mapXueqiuRow(row, code)).filter((clue): clue is RawClue => clue !== null));
-    await new Promise((resolve) => setTimeout(resolve, 1_200 + Math.floor(Math.random() * 1_000)));
+      if (!attempt.ok) throw new Error(`返回状态 ${attempt.status}`);
+      const text = await attempt.text();
+      if (!text.trimStart().startsWith("{")) throw new Error("雪球返回了风控页面，本轮停止，等待下一周期");
+      return JSON.parse(text) as { code?: number; list?: unknown[]; statuses?: unknown[]; error_description?: string; message?: string };
+    });
+    if (result.error === "CHALLENGE_PAGE") throw new Error("雪球返回了风控页面，本轮停止，等待下一周期");
+    if (!result.rows.length) continue;
+    batches.push(
+      result.rows
+        .map((row) => mapXueqiuRow(row as Record<string, unknown>, item.code))
+        .filter((clue): clue is RawClue => clue !== null),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 900 + Math.floor(Math.random() * 700)));
   }
-  return batches.flat();
+  xueqiuCursor = (cursor + searched) % Math.max(items.length, 1);
+  return dedupClues(batches.flat());
 }
 
-/** 把雪球时间线单条记录映射为线索；超出 72 小时窗口或字段缺失则返回 null。 */
+/** 把雪球单条记录映射为线索；超出 72 小时窗口或字段缺失则返回 null。 */
 function mapXueqiuRow(row: Record<string, unknown>, code: string): RawClue | null {
   const id = String(row.id ?? row.status_id ?? "");
   const title = cleanText(String(row.title ?? row.description ?? row.text ?? "")).slice(0, 240);

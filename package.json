@@ -13,6 +13,7 @@
     "test": "tsx --test server/*.test.ts src/lib/*.test.ts",
     "check": "tsc -b --pretty false",
     "sentiment:check": "tsx scripts/check-sentiment.ts",
+    "xueqiu:probe": "tsx scripts/probe-xueqiu.ts",
     "xueqiu:session": "tsx scripts/read-xueqiu-session.ts",
     "xueqiu:verify": "tsx scripts/verify-xueqiu-cookie.ts",
     "xueqiu:sync": "tsx scripts/sync-xueqiu.ts"
