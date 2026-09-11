@@ -15,8 +15,10 @@ import {
   type DailyCandidateList,
   type DailyCandidateOutcome,
 } from "./database.ts";
-import { buildIndustryAnalytics, classifyStockIndustry } from "./industryAnalytics.ts";
+import { buildIndustryAnalytics, classifyStockIndustry, type IndustryPulse } from "./industryAnalytics.ts";
 import { DAILY_FOCUS_VERSION, selectDailyCandidates, type DailyCandidateInput, type DailyCandidateScored, type DiscussionWindow } from "./dailyCandidateStrategy.ts";
+import { classifyShareReductionText } from "./shareReduction.ts";
+import { deriveDailyLeaders, leadershipLabel, type LeadershipDayRow } from "./leadership.ts";
 import { isTradingDate, verifiedTradingDaysSinceListing } from "../src/domain/marketCalendar.ts";
 
 export interface DailyCandidateDiscussionSource extends DiscussionSourceState {
@@ -81,6 +83,8 @@ export interface DailyCandidateSource {
   marketComplete: boolean;
   /** Trading-calendar decision supplied by caller (prevents using local current date). */
   isTradingDay: boolean;
+  /** 当日涨停池与龙虎榜事实；缺失表示尚未取证，龙头加分按 0 处理。 */
+  leadership?: { tradeDate: string; rows: LeadershipDayRow[] } | null;
   /** Defaults to 15:30 Asia/Shanghai; persisted with methodology metadata. */
   freezeDeadlineMinutes?: number;
 }
@@ -354,7 +358,33 @@ function buildMarketIndustrySignals(quotes: MarketQuote[], marketReturn: number,
   return result;
 }
 
-function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tradeDate), elapsedMinutes = 240): { inputs: DailyCandidateInput[]; evidence: Map<string, SentimentEvent[]>; benchmark: Array<{ code: string; industryCode: string | null; industryName: string | null }>; verifiedDiscussionCodes: number } {
+/**
+ * 当日数据窗口内可核验的股东减持信号，只读取上市公司公告标题。
+ * 同一只股票出现多条时保留更严重的一条，同级保留最新的一条。
+ */
+function shareReductionByCode(events: SentimentEvent[]): Map<string, NonNullable<DailyCandidateInput["shareReduction"]>> {
+  const result = new Map<string, NonNullable<DailyCandidateInput["shareReduction"]>>();
+  for (const event of events) {
+    if (event.sourceKind !== "announcement") continue;
+    const match = classifyShareReductionText(event.title);
+    if (!match) continue;
+    const signal = { level: match.level, title: event.title, publishedAt: event.publishedAt, sourceKind: event.sourceKind, matched: match.matched };
+    for (const stock of event.relatedStocks) {
+      const current = result.get(stock.code);
+      if (!current || (current.level === "minor" && signal.level === "major") || (current.level === signal.level && signal.publishedAt > current.publishedAt)) result.set(stock.code, signal);
+    }
+  }
+  return result;
+}
+
+/** 每日聚焦里的“行业舆情”角度：行业新闻证据 + 冻结时的评分输入。 */
+export interface DailyCandidateIndustryNewsAngle {
+  count: number;
+  textDirection: number;
+  evidence: IndustryPulse["newsEvidence"];
+}
+
+function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tradeDate), elapsedMinutes = 240): { inputs: DailyCandidateInput[]; evidence: Map<string, SentimentEvent[]>; industryNews: Map<string, DailyCandidateIndustryNewsAngle>; benchmark: Array<{ code: string; industryCode: string | null; industryName: string | null }>; verifiedDiscussionCodes: number; shareReductionExclusions: string[] } {
   const featureStart = cutoffFor(source.previousTradeDate);
   const verifiedStates = new Map(source.sourceStates
     .filter((state) => state.state === "connected" && state.queryFrom !== null && state.queryTo !== null)
@@ -379,7 +409,41 @@ function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tra
   const cleanMarket = source.quotes.filter((quote) => cleanMarketQuote(quote, source));
   const marketPct = cleanMarket.length ? cleanMarket.reduce((sum, quote) => sum + quote.pctChange, 0) / cleanMarket.length : 0;
   const marketIndustryByCode = buildMarketIndustrySignals(cleanMarket, marketPct, source.marketAsOf);
+  const reductions = shareReductionByCode(events);
+  // 龙头事实：用本地已分类的行业名覆盖涨停池的行业短名，保证与候选展示的行业口径一致；
+  // 当日未取证时 leadership 为 null，策略按 0 分处理，不伪造龙头。
+  const leadershipReady = Boolean(source.leadership && source.leadership.tradeDate === source.tradeDate && source.leadership.rows.length);
+  const resolvedIndustryName = (code: string) => industryByCode.get(code)?.industry.name ?? marketIndustryByCode.get(code)?.name ?? null;
+  const leadershipRows = leadershipReady ? source.leadership!.rows.map((row) => ({ ...row, industryName: resolvedIndustryName(row.code) ?? row.industryName })) : [];
+  const leaders = leadershipReady ? deriveDailyLeaders(leadershipRows, source.tradeDate) : null;
+  const leadershipByCode = new Map(leadershipRows.map((row) => [row.code, row]));
   const evidence = new Map<string, SentimentEvent[]>();
+  const industryNews = new Map<string, DailyCandidateIndustryNewsAngle>();
+  const leadershipInput = (code: string): DailyCandidateInput["leadership"] => {
+    // 整日未取证：返回 null，界面必须显示「未取证」而不是「不是龙头」。
+    if (!leadershipReady) return null;
+    const row = leadershipByCode.get(code);
+    // 当日已取证，但这只股票既没涨停也没上龙虎榜：给出全 0 的事实记录。
+    if (!row) return { boardCount: 0, firstSealTime: null, lastSealTime: null, breakCount: 0, sealAmount: null, dragonTiger: null, industryLimitUps: 0, tier: "none", reasons: [] };
+    const mark = leaders?.marks[code];
+    return {
+      boardCount: row.boardCount,
+      firstSealTime: row.firstSealTime,
+      lastSealTime: row.lastSealTime,
+      breakCount: row.breakCount,
+      sealAmount: row.sealAmount,
+      dragonTiger: row.dragonTiger ? {
+        netAmount: row.dragonTiger.netAmount,
+        buyAmount: row.dragonTiger.buyAmount,
+        sellAmount: row.dragonTiger.sellAmount,
+        reasons: [...row.dragonTiger.reasons],
+        listCount: row.dragonTiger.listCount,
+      } : null,
+      industryLimitUps: 0,
+      tier: mark?.tier ?? "none",
+      reasons: mark ? [...mark.reasons] : [],
+    };
+  };
   const inputs = source.quotes.flatMap((quote): DailyCandidateInput[] => {
     const stock = stockByCode.get(quote.code);
     const { open, high, low, previousClose, price } = quote;
@@ -401,6 +465,12 @@ function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tra
     const forum = relevant.filter((event) => event.sourceKind === "forum");
     const industryContribution = industryByCode.get(quote.code);
     const pulse = industryContribution ? analytics.items.find((item) => item.profile.code === industryContribution.industry.code) : undefined;
+    // 行业舆情角度：行业当天有可核验新闻时，条数与方向作为独立的评分输入并留档证据。
+    const industryEvidence = pulse?.newsEvidence ?? [];
+    const industryNewsAngle = industryEvidence.length
+      ? { count: industryEvidence.length, textDirection: calculateCutoffTextSignals(industryEvidence, cutoff).textDirection, evidence: industryEvidence }
+      : null;
+    if (industryNewsAngle) industryNews.set(quote.code, industryNewsAngle);
     const sourceCount = new Set(relevant.map((event) => event.source)).size;
     return [{
       code: quote.code, name: quote.name, exchange: quote.exchange, listingTradingDays: tradingDaysSince(quote.listingDate, source.tradeDate), tradeDate: source.tradeDate,
@@ -413,24 +483,49 @@ function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tra
       duplicateRatio: relevantBeforeDedupe.length ? (relevantBeforeDedupe.length - relevant.length) / relevantBeforeDedupe.length : 0,
       hasNonForumCorroboration: relevant.some((event) => event.sourceKind === "news" || event.sourceKind === "announcement"),
       industry: pulse ? { name: pulse.profile.name, textHeat: pulse.textHeat, textDirection: pulse.textDirection, marketStrength: pulse.marketStrength, breadth: pulse.breadth, relation: pulse.relation } : marketIndustryByCode.get(quote.code) ?? null,
+      shareReduction: reductions.get(quote.code) ?? null,
+      industryNews: industryNewsAngle ? { count: industryNewsAngle.count, textDirection: industryNewsAngle.textDirection } : null,
+      leadership: leadershipInput(quote.code),
       isSuspended: quote.amount <= 0, onePriceLimit: limitState.onePriceLimit || observableOnePriceLimit, reopenedLimit: limitState.reopenedLimit,
       threeDayReturn: (returns.get(quote.code) ?? []).reduce((sum, item) => sum + item.pctChange, 0),
     }];
   });
+  // 行业涨停家数按候选集合内的涨停股统计，用于「板块合力」这一子项。
+  const industryLimitUps = new Map<string, number>();
+  for (const input of inputs) {
+    const name = input.industry?.name;
+    if (!name || (input.leadership?.boardCount ?? 0) < 1) continue;
+    industryLimitUps.set(name, (industryLimitUps.get(name) ?? 0) + 1);
+  }
+  for (const input of inputs) {
+    if (!input.leadership) continue;
+    input.leadership.industryLimitUps = input.industry?.name ? industryLimitUps.get(input.industry.name) ?? 0 : 0;
+  }
   const benchmark = cleanMarket.map((quote) => {
     const industry = classifyStockIndustry({ code: quote.code, name: quote.name, industry: quote.industryName ? { code: "", name: quote.industryName, parent: quote.industryName, level: "行业", taxonomy: "东方财富行业", asOf: source.marketAsOf } : undefined });
     return { code: quote.code, industryCode: industry?.code ?? null, industryName: industry?.name ?? null };
   });
-  return { inputs, evidence, benchmark, verifiedDiscussionCodes };
+  const nameByCode = new Map(source.quotes.map((quote) => [quote.code, quote.name]));
+  const shareReductionExclusions = [...reductions.entries()]
+    .sort((left, right) => Number(right[1].level === "major") - Number(left[1].level === "major") || right[1].publishedAt.localeCompare(left[1].publishedAt))
+    .slice(0, 12)
+    .map(([code, signal]) => `${code} ${nameByCode.get(code) ?? ""}：${signal.level === "major" ? "大幅减持" : "减持"} · ${signal.title}（${signal.publishedAt.slice(0, 10)}）`);
+  return { inputs, evidence, industryNews, benchmark, verifiedDiscussionCodes, shareReductionExclusions };
 }
 
 function quality(source: DailyCandidateSource, cutoff: string): { ready: boolean; reason: string | null; detail: Record<string, unknown> } {
-  if (!source.marketComplete) return { ready: false, reason: "当日沪深完整行情未就绪", detail: { market: "incomplete" } };
+  // 龙头事实来自涨停池 + 龙虎榜；未取证时保持 unavailable，不计入加分。每个分支都带上，
+  // 这样盘中预览也能看到当日龙头数据是否就绪。
+  const leadershipDetail = {
+    leadership: source.leadership && source.leadership.tradeDate === source.tradeDate && source.leadership.rows.length ? "available" : "unavailable",
+    leadershipRows: source.leadership?.rows.length ?? 0,
+  };
+  if (!source.marketComplete) return { ready: false, reason: "当日沪深完整行情未就绪", detail: { market: "incomplete", ...leadershipDetail } };
   // A batch fetched after 15:00 is the immutable close input. Its wall-clock
   // cache age must not invalidate it later in the evening, and an illiquid
   // stock's own last-trade timestamp need not equal the batch close timestamp.
   if (!atOrAfter(source.marketAsOf, cutoff) || source.quotes.some((quote) => quote.tradeDate !== source.tradeDate)) {
-    return { ready: false, reason: "行情数据未覆盖收盘", detail: { market: "before-close" } };
+    return { ready: false, reason: "行情数据未覆盖收盘", detail: { market: "before-close", ...leadershipDetail } };
   }
   const cleanQuotes = source.quotes.filter((quote) => cleanMarketQuote(quote, source));
   const limitMetadataCovered = cleanQuotes.filter((quote) => quote.limitPercent === 5 || quote.limitPercent === 10 || quote.limitPercent === 20).length;
@@ -448,22 +543,45 @@ function quality(source: DailyCandidateSource, cutoff: string): { ready: boolean
       boardLimitMetadata: limitMetadataCovered === cleanQuotes.length ? "complete" : limitMetadataCovered ? "partial" : "unavailable",
       boardLimitCovered: limitMetadataCovered,
       boardLimitUniverse: cleanQuotes.length,
+      ...leadershipDetail,
       clueFailures: source.clueFailures,
       sourceStates: source.sourceStates,
     },
   };
 }
 
-function entry(item: DailyCandidateScored, evidence: SentimentEvent[]): DailyCandidateEntry {
+function entry(item: DailyCandidateScored, evidence: SentimentEvent[], industryNews: DailyCandidateIndustryNewsAngle | null = null): DailyCandidateEntry {
+  const industryNewsReason = item.industry && industryNews
+    ? `${industryNews.evidence.some((event) => event.scope === "industry") ? "行业新闻" : "成分股新闻"} ${industryNews.count} 条`
+    : "";
+  const leadership = item.inputAudit.leadership ?? null;
+  const leadershipText = leadershipLabel(item.leadershipTier, leadership?.boardCount ?? 0);
   return {
     code: item.code, rank: 0, grade: item.grade!, isHotIndustry: item.isHotIndustry, baseScore: item.baseScore, overheatPenalty: item.overheatPenalty, finalScore: item.finalScore,
     scores: item.scores,
-    snapshot: { ...item.inputAudit, industry: item.industry, discussionGrowth: item.discussionGrowth, events: evidence.map((event) => ({ id: event.id, title: event.title, source: event.source, sourceKind: event.sourceKind, tone: event.tone, confidence: event.confidence, heat: event.heat, publishedAt: event.publishedAt, ...(event.url ? { url: event.url } : {}) })) },
+    snapshot: {
+      ...item.inputAudit, industry: item.industry, discussionGrowth: item.discussionGrowth,
+      leadership: leadership ? { ...leadership, bonus: item.leadershipBonus, label: leadershipText } : null,
+      events: evidence.map((event) => ({ id: event.id, title: event.title, source: event.source, sourceKind: event.sourceKind, tone: event.tone, confidence: event.confidence, heat: event.heat, publishedAt: event.publishedAt, ...(event.url ? { url: event.url } : {}) })),
+      industryNewsEvidence: industryNews?.evidence ?? [],
+    },
     reasons: [
       "成交额趋势确认",
       "当日上涨且跑赢市场",
       evidence.length ? "文本或讨论提供加分" : "文本与讨论缺失，按市场信号入选",
-      item.industry ? `行业：${item.industry.name}` : "行业数据缺失",
+      item.industry ? `行业：${item.industry.name}${industryNewsReason ? ` · ${industryNewsReason}` : ""}` : "行业数据缺失",
+      // 龙头是外部可核验事实（涨停池 + 龙虎榜），单独列出判定依据，便于逐条复核。
+      item.leadershipTier !== "none" && leadershipText
+        ? `龙头：${leadershipText}（加分 ${item.leadershipBonus}）${leadership?.reasons.length ? ` · ${leadership.reasons.join(" · ")}` : ""}`
+        : !leadership
+          ? "涨停池/龙虎榜未取证"
+          : leadership.boardCount >= 2
+            ? `当日 ${leadership.boardCount} 连板，未达龙头标准（加分 ${item.leadershipBonus}）${leadership.reasons.length ? ` · ${leadership.reasons.join(" · ")}` : ""}`
+            : leadership.boardCount === 1
+              ? `当日首板涨停，未达龙头标准（加分 ${item.leadershipBonus}）${leadership.reasons.length ? ` · ${leadership.reasons.join(" · ")}` : ""}`
+              : leadership.dragonTiger
+                ? `仅登上龙虎榜，当日未涨停（加分 ${item.leadershipBonus}）`
+                : "当日未涨停、未上龙虎榜，无龙头加分",
     ],
   };
 }
@@ -531,10 +649,10 @@ function response(list: DailyCandidateList): DailyCandidateListResponse {
 
 function previewFromInputs(source: DailyCandidateSource, now: Date, assembled: ReturnType<typeof buildInputs>, cutoff = cutoffFor(source.tradeDate)): DailyCandidateListResponse {
   const result = selectDailyCandidates(assembled.inputs);
-  const items = withNextTradingDayTrends(source.tradeDate, result.items.map((item, index) => ({ ...entry(item, assembled.evidence.get(item.code) ?? []), rank: index + 1 })));
+  const items = withNextTradingDayTrends(source.tradeDate, result.items.map((item, index) => ({ ...entry(item, assembled.evidence.get(item.code) ?? [], assembled.industryNews.get(item.code) ?? null), rank: index + 1 })));
   return {
     tradeDate: source.tradeDate, methodologyVersion: DAILY_FOCUS_VERSION, status: "preview", origin: "prospective", featureCutoff: cutoff, marketAsOf: source.marketAsOf, clueAsOf: source.clueAsOf,
-    frozenAt: null, items, dataQuality: { previewAt: now.toISOString(), ...quality(source, cutoffFor(source.tradeDate)).detail, discussionBaseline: assembled.verifiedDiscussionCodes > 0 ? "verified" : "unavailable", verifiedDiscussionCandidates: assembled.verifiedDiscussionCodes, clueFailures: source.clueFailures, referenceAudit: result.referenceAudit, selectionDiagnostics: result.selectionDiagnostics }, exclusionCounts: result.exclusionCounts,
+    frozenAt: null, items, dataQuality: { previewAt: now.toISOString(), ...quality(source, cutoffFor(source.tradeDate)).detail, discussionBaseline: assembled.verifiedDiscussionCodes > 0 ? "verified" : "unavailable", verifiedDiscussionCandidates: assembled.verifiedDiscussionCodes, clueFailures: source.clueFailures, referenceAudit: result.referenceAudit, selectionDiagnostics: result.selectionDiagnostics, leadershipDiagnostics: result.leadershipDiagnostics, ...(assembled.shareReductionExclusions.length ? { shareReductionExclusions: assembled.shareReductionExclusions } : {}) }, exclusionCounts: result.exclusionCounts,
     reason: result.status === "available" ? null : "没有标的通过当日筛选门槛",
   };
 }

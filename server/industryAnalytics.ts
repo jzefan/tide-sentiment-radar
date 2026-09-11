@@ -62,6 +62,8 @@ export interface IndustryPulse {
   eligibleStockCount: number;
   historicalRelationship: IndustryHistoryState;
   evidence: Array<{ id: string; title: string; source: string; publishedAt: string; tone: SentimentTone; confidence: number }>;
+  /** 行业舆情角度：最新 5 条非论坛事件，行业级新闻优先，并标明是行业级还是成分股新闻。 */
+  newsEvidence: Array<{ id: string; title: string; source: string; publishedAt: string; tone: SentimentTone; confidence: number; sourceKind: SentimentEvent["sourceKind"]; scope: "industry" | "constituent"; url?: string }>;
 }
 
 export interface IndustryStockContribution {
@@ -155,6 +157,7 @@ export function buildIndustryAnalytics(source: IndustrySource): IndustryAnalytic
       eventsByCode.set(related.code, list);
     }
   }
+  const industryEventIds = new Set<string>();
   for (const group of groups.values()) {
     const seen = new Set<string>();
     for (const stock of group.stocks) {
@@ -164,23 +167,24 @@ export function buildIndustryAnalytics(source: IndustrySource): IndustryAnalytic
         group.events.push(event);
       }
     }
-    // 行业级新闻可能没有明确股票代码；只有明确标记为“行业”且文本命中
-    // 当前行业名称/别名时才补入，避免把单家公司新闻扩散到整个行业。
+    // 行业级新闻：只有新闻来源、非公司公告，且**标题**命中当前行业名称/别名时才补入。
+    // 只看标题是为了不让正文里顺带提到的行业把单家公司新闻扩散成整个行业的舆情；
+    // 明确标记为“行业”的事件（eventType）始终按行业事件处理。
     const aliases = industryAliases(group.profile);
     for (const event of source.events) {
-      if (seen.has(event.id) || event.category === "公司公告" || event.eventType !== "行业") continue;
-      const text = `${event.title} ${event.summary} ${event.topics.join(" ")}`;
-      if (aliases.some((alias) => alias && text.includes(alias))) {
-        seen.add(event.id);
-        group.events.push(event);
-      }
+      if (seen.has(event.id) || event.category === "公司公告" || event.eventType === "公司") continue;
+      const industryLevel = event.eventType === "行业" || (event.sourceKind === "news" && aliases.some((alias) => alias && event.title.includes(alias)));
+      if (!industryLevel) continue;
+      seen.add(event.id);
+      group.events.push(event);
+      industryEventIds.add(event.id);
     }
   }
   const groupsWithEvents = [...groups.values()].filter((group) => group.events.length > 0);
   const heatBase = groupsWithEvents.map((group) => rawTextHeat(group.events, group.stocks.length));
   // 采用固定可解释口径，不在当前截面内按最大值归一化；否则只出现一个行业时，
   // 一条线索也会被错误抬成100分热点。
-  const pulses = groupsWithEvents.map((group, index) => buildPulse(group, source, marketReturn, Math.round(heatBase[index])));
+  const pulses = groupsWithEvents.map((group, index) => buildPulse(group, source, marketReturn, Math.round(heatBase[index]), industryEventIds));
   pulses.sort((a, b) => b.textHeat - a.textHeat || b.marketStrength - a.marketStrength);
 
   const profileToPulse = new Map(pulses.map((pulse) => [pulse.profile.code, pulse]));
@@ -225,7 +229,7 @@ export function filterIndustryAnalytics(result: IndustryAnalyticsResult, params:
   return { ...result, items };
 }
 
-function buildPulse(group: InternalGroup, source: IndustrySource, marketReturn: number, normalizedHeat: number): IndustryPulse {
+function buildPulse(group: InternalGroup, source: IndustrySource, marketReturn: number, normalizedHeat: number, industryEventIds: ReadonlySet<string> = new Set()): IndustryPulse {
   const events = group.events;
   const independentEvents = dedupeEvents(events).length;
   const textDirection = direction(events);
@@ -253,6 +257,16 @@ function buildPulse(group: InternalGroup, source: IndustrySource, marketReturn: 
       ? "观察中"
       : "常态";
   const evidence = [...events].sort((a, b) => new Date(b.publishedAt).valueOf() - new Date(a.publishedAt).valueOf()).slice(0, 5).map((event) => ({ id: event.id, title: event.title, source: event.source, publishedAt: event.publishedAt, tone: event.tone, confidence: event.confidence }));
+  // 行业舆情角度只取可核验的公开来源（新闻与公告），行业级新闻排在成分股新闻之前。
+  const newsEvidence = events
+    .filter((event) => event.sourceKind !== "forum")
+    .sort((left, right) => Number(industryEventIds.has(right.id)) - Number(industryEventIds.has(left.id)) || new Date(right.publishedAt).valueOf() - new Date(left.publishedAt).valueOf())
+    .slice(0, 5)
+    .map((event) => ({
+      id: event.id, title: event.title, source: event.source, publishedAt: event.publishedAt, tone: event.tone, confidence: event.confidence,
+      sourceKind: event.sourceKind, scope: industryEventIds.has(event.id) ? "industry" as const : "constituent" as const,
+      ...(event.url ? { url: event.url } : {}),
+    }));
   return {
     profile: group.profile,
     textHeat,
@@ -275,6 +289,7 @@ function buildPulse(group: InternalGroup, source: IndustrySource, marketReturn: 
     eligibleStockCount: group.stocks.length,
     historicalRelationship: { ...getIndustryHistoricalRelationship(group.profile.code, 5), horizon: "T+5" },
     evidence,
+    newsEvidence,
   };
 }
 

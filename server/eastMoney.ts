@@ -247,11 +247,65 @@ const ANNOUNCEMENT_PAGE_SIZE = 100;
 const ANNOUNCEMENT_MAX_PAGES = 20;
 const ANNOUNCEMENT_MAX_RECORDS = ANNOUNCEMENT_PAGE_SIZE * ANNOUNCEMENT_MAX_PAGES;
 const ANNOUNCEMENT_PAGE_CONCURRENCY = 4;
+/** 一个数据窗口最多覆盖的自然日数；节假日跨度更大时不做没有证明的部分抓取。 */
+const ANNOUNCEMENT_MAX_DAYS = 8;
 
+/**
+ * 公告按自然日逐日取证后再合并。
+ *
+ * 交易所公告在早间和盘后各有一波发布，单日总量通常低于分页上限，可以被游标穷尽证明；
+ * 而把上一个交易日到当日的合并窗口一次查完时（例如月末叠加半年报可以到 1.5 万条），
+ * 总量远超分页上限，反而连一天的可证明窗口都拿不到，导致公告永远无法作为每日聚焦的
+ * 可审计输入。逐日取证后，每一天各自被证明穷尽，合并区间仍然连续且完整。
+ */
 async function fetchAnnouncements(queryDates?: { beginTime: string; endTime: string }): Promise<{ items: RawClue[]; range: LiveClueRangeProof | null }> {
+  const beginTime = queryDates?.beginTime ?? shanghaiDate(-1);
+  const endTime = queryDates?.endTime ?? shanghaiDate(0);
+  const days = calendarDays(beginTime, endTime);
+  if (!days.length || days.length > ANNOUNCEMENT_MAX_DAYS) return { items: [], range: null };
+  const perDay: Array<{ items: RawClue[]; range: LiveClueRangeProof | null }> = [];
+  for (const day of days) perDay.push(await fetchAnnouncementDay(day));
+  const items: RawClue[] = [];
+  const seen = new Set<string>();
+  for (const day of perDay) for (const item of day.items) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    items.push(item);
+  }
+  const proven = composeAnnouncementRange(perDay.map((day) => day.range));
+  return { items, range: proven };
+}
+
+/**
+ * 合并逐日范围证明：每一天都必须自己游标穷尽，且相邻两天之间不能出现缺口。
+ * 因为 display_time 可能溢出到相邻自然日，逐日区间允许重叠，但不允许跳过任何一天。
+ */
+export function composeAnnouncementRange(ranges: Array<LiveClueRangeProof | null>): LiveClueRangeProof | null {
+  if (!ranges.length) return null;
+  const proven = ranges.every((range): range is LiveClueRangeProof => Boolean(range
+    && range.kind === "server-window-paginated"
+    && range.cursorExhausted === true
+    && Number.isFinite(Date.parse(range.queryFrom))
+    && Number.isFinite(Date.parse(range.queryTo))
+    && Date.parse(range.queryFrom) <= Date.parse(range.queryTo)));
+  if (!proven) return null;
+  for (let index = 1; index < ranges.length; index += 1) {
+    // 重叠不构成缺口；只有后一天开始得明显晚于前一天结束（如跳过周末）才拒绝整段窗口。
+    const gap = Date.parse(ranges[index]!.queryFrom) - Date.parse(ranges[index - 1]!.queryTo);
+    if (gap > 1_000) return null;
+  }
+  return {
+    kind: "server-window-paginated",
+    queryFrom: ranges[0]!.queryFrom,
+    queryTo: ranges[ranges.length - 1]!.queryTo,
+    cursorExhausted: true,
+  };
+}
+
+async function fetchAnnouncementDay(day: string): Promise<{ items: RawClue[]; range: LiveClueRangeProof | null }> {
   const baseParams = {
     sr: "-1", page_size: String(ANNOUNCEMENT_PAGE_SIZE), ann_type: "A", stock_list: "", client_source: "web",
-    begin_time: queryDates?.beginTime ?? shanghaiDate(-1), end_time: queryDates?.endTime ?? shanghaiDate(0),
+    begin_time: day, end_time: day,
   };
   const first = await fetchAnnouncementPage(1, baseParams);
   const pages = Math.max(1, Math.ceil(first.total / ANNOUNCEMENT_PAGE_SIZE));
@@ -262,42 +316,60 @@ async function fetchAnnouncements(queryDates?: { beginTime: string; endTime: str
   }
   const stableTotal = remaining.every((page) => page.total === first.total);
   const fullyExhausted = pages <= ANNOUNCEMENT_MAX_PAGES && first.total <= ANNOUNCEMENT_MAX_RECORDS && stableTotal;
+  if (!fullyExhausted) diagLog("clues", "公告单日窗口未证明穷尽", day, `total=${first.total}`, `pages=${pages}`, `stableTotal=${stableTotal}`);
   const rows = [...first.rows, ...remaining.flatMap((page) => page.rows)].slice(0, ANNOUNCEMENT_MAX_RECORDS);
-  const items = rows.map((row): RawClue | null => {
-    const id = String(row.art_code ?? "");
-    const title = stripHtml(String(row.title_ch ?? row.title ?? ""));
-    const publishedAt = parseEastMoneyTimestamp(String(row.display_time ?? row.notice_date ?? ""));
-    if (!id || !title || !publishedAt) return null;
-    const codes = Array.isArray(row.codes) ? row.codes as Array<Record<string, unknown>> : [];
-    const stockCodes = codes
-      .filter((item) => String(item.ann_type ?? "").split(",").includes("A"))
-      .map((item) => String(item.stock_code ?? ""))
-      .filter((code) => /^\d{6}$/.test(code));
-    const firstCode = stockCodes[0] ?? "";
-    const columns = Array.isArray(row.columns) ? row.columns as Array<Record<string, unknown>> : [];
-    const columnNames = columns.map((item) => String(item.column_name ?? "")).filter(Boolean);
-    return {
-      id: `公告-${id}`,
-      source: "上市公司公告",
-      sourceKind: "announcement",
-      title,
-      summary: columnNames.length ? `${title}。公告类别：${columnNames.join("、")}。` : title,
-      publishedAt,
-      url: firstCode ? `https://data.eastmoney.com/notices/detail/${firstCode}/${id}.html` : "https://data.eastmoney.com/notices/",
-      stockCodes,
-      interactionCount: 0,
-    };
-  }).filter((item): item is RawClue => item !== null);
-  // The endpoint accepts the two date parameters server-side and `total_hits` has been
-  // exhausted above, so this is the only EastMoney adapter currently able to attest a range.
+  const items = rows.map(announcementClue).filter((item): item is RawClue => item !== null);
+  if (!fullyExhausted) return { items, range: null };
+  // 接口按“公告日期”过滤，但返回的 display_time 可能落在该自然日之外
+  // （盘后公告的公告日期是次日，实际在头一天晚上就展示）。证明区间必须覆盖
+  // 真正返回的时间戳，否则这些公告会被当成区间外证据而整批作废。
+  const windowStart = Date.parse(`${day}T00:00:00.000+08:00`);
+  const windowEnd = Date.parse(`${day}T23:59:59.999+08:00`);
+  const timestamps = items.map((item) => Date.parse(item.publishedAt)).filter((value) => Number.isFinite(value));
   return {
     items,
-    range: fullyExhausted ? {
+    range: {
       kind: "server-window-paginated",
-      queryFrom: new Date(`${baseParams.begin_time}T00:00:00.000+08:00`).toISOString(),
-      queryTo: new Date(`${baseParams.end_time}T23:59:59.999+08:00`).toISOString(),
+      queryFrom: new Date(Math.min(windowStart, ...timestamps)).toISOString(),
+      queryTo: new Date(Math.max(windowEnd, ...timestamps)).toISOString(),
       cursorExhausted: true,
-    } : null,
+    },
+  };
+}
+
+/** 合并区间必须由连续自然日组成，否则不接受任何范围证明。 */
+export function calendarDays(beginTime: string, endTime: string): string[] {
+  const start = Date.parse(`${beginTime}T00:00:00.000Z`);
+  const end = Date.parse(`${endTime}T00:00:00.000Z`);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return [];
+  const days: string[] = [];
+  for (let value = start; value <= end; value += 86_400_000) days.push(new Date(value).toISOString().slice(0, 10));
+  return days;
+}
+
+function announcementClue(row: Record<string, unknown>): RawClue | null {
+  const id = String(row.art_code ?? "");
+  const title = stripHtml(String(row.title_ch ?? row.title ?? ""));
+  const publishedAt = parseEastMoneyTimestamp(String(row.display_time ?? row.notice_date ?? ""));
+  if (!id || !title || !publishedAt) return null;
+  const codes = Array.isArray(row.codes) ? row.codes as Array<Record<string, unknown>> : [];
+  const stockCodes = codes
+    .filter((item) => String(item.ann_type ?? "").split(",").includes("A"))
+    .map((item) => String(item.stock_code ?? ""))
+    .filter((code) => /^\d{6}$/.test(code));
+  const firstCode = stockCodes[0] ?? "";
+  const columns = Array.isArray(row.columns) ? row.columns as Array<Record<string, unknown>> : [];
+  const columnNames = columns.map((item) => String(item.column_name ?? "")).filter(Boolean);
+  return {
+    id: `公告-${id}`,
+    source: "上市公司公告",
+    sourceKind: "announcement",
+    title,
+    summary: columnNames.length ? `${title}。公告类别：${columnNames.join("、")}。` : title,
+    publishedAt,
+    url: firstCode ? `https://data.eastmoney.com/notices/detail/${firstCode}/${id}.html` : "https://data.eastmoney.com/notices/",
+    stockCodes,
+    interactionCount: 0,
   };
 }
 

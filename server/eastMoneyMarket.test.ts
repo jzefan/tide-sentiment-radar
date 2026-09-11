@@ -360,7 +360,7 @@ test("v8-to-v11 migration is reload-safe and replays prior listing dates when f2
     const listingColumns = (postWorkers.prepare("PRAGMA table_info(market_daily_quotes)").all() as Array<{ name: string }>)
       .filter((column) => column.name === "listing_date");
     postWorkers.close();
-    assert.equal(workerVersion.user_version, 16);
+    assert.equal(workerVersion.user_version, 17);
     assert.equal(listingColumns.length, 1);
     const replay = await runReplayWorker(path);
     assert.equal(replay.replayed, "2024-01-01");

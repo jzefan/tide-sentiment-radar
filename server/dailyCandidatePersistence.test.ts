@@ -121,7 +121,7 @@ test("literal v10 to v11 adds data_as_of without losing a completed outcome and 
     reloaded = await import(`./database.ts?daily-candidate-v11-reload=${Date.now()}`) as Database;
     assert.equal(reloaded.getDailyCandidateOutcomes("2026-08-25")[0]?.dataAsOf, null);
     raw = new DatabaseSync(path);
-    assert.equal((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 16);
+    assert.equal((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 17);
   } finally {
     raw?.close();
     reloaded?.closeDatabaseForTests();
@@ -157,7 +157,7 @@ test("literal v11 to v12 creates the code/date history index and reloads idempot
     const plan = raw.prepare("EXPLAIN QUERY PLAN SELECT code, trade_date FROM market_daily_quotes WHERE code = ? ORDER BY trade_date DESC LIMIT 5").all("600001") as Array<{ detail: string }>;
     assert.equal(index?.name, "market_quotes_code_trade_date");
     assert.ok(plan.some((row) => row.detail.includes("market_quotes_code_trade_date")), JSON.stringify(plan));
-    assert.equal((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 16);
+    assert.equal((raw.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 17);
     raw.close();
     raw = null;
     reloaded = await import(`./database.ts?daily-candidate-v12-reload=${Date.now()}`) as Database;
@@ -277,7 +277,7 @@ test("v8 to v11 migration creates daily candidate tables, outcome FK, and is rel
     firstLoad = null;
     fixture.close();
     v8 = null;
-    assert.equal(version.user_version, 16);
+    assert.equal(version.user_version, 17);
     assert.deepEqual(objects, [
       { type: "index", name: "daily_candidate_lists_origin_date" },
       { type: "index", name: "daily_candidate_outcomes_observing" },

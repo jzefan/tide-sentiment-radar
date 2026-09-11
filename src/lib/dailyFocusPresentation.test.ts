@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { DAILY_FOCUS_REFRESH_MS, dailyFocusCandidateStrength, dailyFocusDateOptions, dailyFocusPhase, dailyFocusSourceKind, dailyFocusStatus, discussionBaselineMedian, keepDailyFocusPayload, qualityEntries, scoreRows, shouldPollDailyFocus } from "./dailyFocusPresentation";
+import { DAILY_FOCUS_REFRESH_MS, dailyFocusCandidateStrength, dailyFocusDateOptions, dailyFocusExclusionLabel, dailyFocusIndustryLabel, dailyFocusLeadership, dailyFocusPhase, dailyFocusScoreBreakdown, dailyFocusSourceKind, dailyFocusStatus, discussionBaselineMedian, industryNewsScore, keepDailyFocusPayload, qualityEntries, scoreRows, shouldPollDailyFocus } from "./dailyFocusPresentation";
 
 test("polls only the current daily-focus view every minute and retains stale payloads on refresh failure", () => {
   assert.equal(DAILY_FOCUS_REFRESH_MS, 60_000);
@@ -47,13 +47,37 @@ test("score rows expose the six selection dimensions in a stable audit order", (
     scoreRows({ turnover: 23, direction: 11, discussion: 13, price: 12, industry: 7, reliability: 2 }),
     [
       ["成交趋势", 23],
-      ["文本方向", 11],
+      ["情绪方向", 11],
       ["讨论升温", 13],
       ["价格确认", 12],
       ["行业共振", 7],
       ["证据可靠", 2],
     ],
   );
+});
+
+test("candidate rows always name the industry behind a hot-industry tag", () => {
+  assert.equal(dailyFocusIndustryLabel("航海装备Ⅱ", true), "热门行业：航海装备Ⅱ");
+  assert.equal(dailyFocusIndustryLabel("航运港口", false), "行业：航运港口");
+  assert.equal(dailyFocusIndustryLabel(null, true), "热门行业（行业待确认）");
+  assert.equal(dailyFocusIndustryLabel(null, false), "行业待确认");
+});
+
+test("exclusion counts are explained in Chinese, including the new reduction gates", () => {
+  assert.equal(dailyFocusExclusionLabel("majorShareReduction"), "大幅减持");
+  assert.equal(dailyFocusExclusionLabel("shareReduction"), "股东减持");
+  assert.equal(dailyFocusExclusionLabel("amount"), "成交额不足 1 亿");
+  assert.equal(dailyFocusExclusionLabel("unknownKey"), "unknownKey", "未知键保持原样而不是被静默丢弃");
+});
+
+test("industry news scoring matches the strategy: up to one point for count and one for direction", () => {
+  assert.equal(industryNewsScore(null), 0);
+  assert.equal(industryNewsScore(undefined), 0);
+  assert.equal(industryNewsScore({ count: 0, textDirection: 50 }), 0);
+  assert.equal(industryNewsScore({ count: 1, textDirection: 50 }), 1 / 3, "一条新闻只占条数分的三分之一");
+  assert.equal(industryNewsScore({ count: 3, textDirection: 80 }), 2);
+  assert.equal(industryNewsScore({ count: 99, textDirection: 100 }), 2, "行业新闻确认最多 2 分");
+  assert.equal(industryNewsScore({ count: 3, textDirection: 30 }), 1, "低于中性方向的行业新闻不计方向分");
 });
 
 test("discussion audit displays the same five-window median used by the strategy", () => {
@@ -69,4 +93,24 @@ test("daily-focus page omits redundant English and post-close kicker rows", asyn
   assert.equal(page.includes("候选构成"), false);
   assert.equal(page.includes("盘中关注"), true);
   assert.equal(page.includes("待历史确认"), true);
+});
+
+test("separates certified leaders from unverified leadership snapshots", () => {
+  assert.equal(dailyFocusLeadership({}), null, "没有字段时必须区分「未取证」与「不是龙头」");
+  assert.equal(dailyFocusLeadership({ leadership: null }), null);
+  assert.equal(dailyFocusLeadership({ leadership: { tier: "none", boardCount: 2 } }), null, "未达龙头标准不显示徽标");
+  const market = dailyFocusLeadership({
+    leadership: { tier: "market", label: "4 连板 · 市场龙头", bonus: 9.5, reasons: ["当日 4 连板，为全市场最高梯队（最高 4 板）"] },
+  });
+  assert.equal(market?.tier, "market");
+  assert.equal(market?.label, "4 连板 · 市场龙头");
+  assert.equal(market?.bonus, 9.5);
+  assert.deepEqual(market?.reasons, ["当日 4 连板，为全市场最高梯队（最高 4 板）"]);
+  assert.equal(dailyFocusLeadership({ leadership: { tier: "industry", boardCount: 2 } })?.label, "行业龙头", "缺少 label 时回落到层级名称");
+});
+
+test("explains the final score as base plus leadership bonus minus overheat", () => {
+  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 62, overheatPenalty: 0 }), "基础 62.0 − 过热 0.0");
+  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 70, overheatPenalty: 2 }), "基础 62.0 + 龙头 10.0 − 过热 2.0");
+  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 53, overheatPenalty: 9 }), "基础 62.0 − 过热 9.0", "旧记录不会凭空出现龙头加分");
 });

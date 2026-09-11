@@ -49,10 +49,15 @@ import {
   asString,
   dailyFocusCandidateStrength,
   dailyFocusDateOptions,
+  dailyFocusExclusionLabel,
+  dailyFocusIndustryLabel,
+  dailyFocusLeadership,
   dailyFocusPhase,
+  dailyFocusScoreBreakdown,
   dailyFocusSourceKind,
   dailyFocusStatus,
   discussionBaselineMedian,
+  industryNewsScore,
   keepDailyFocusPayload,
   qualityEntries,
   scoreRows,
@@ -1026,6 +1031,8 @@ function DailyFocusPoolPanel({
   const [payload, setPayload] = useState<DailyFocusPoolResponse | null>(null);
   const [windowSessions, setWindowSessions] =
     useState<DailyFocusPoolWindowSessions>(5);
+  /** 观察截止日；空字符串表示跟随最新交易日。 */
+  const [windowEndDate, setWindowEndDate] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [retryNonce, setRetryNonce] = useState(0);
@@ -1038,7 +1045,7 @@ function DailyFocusPoolPanel({
       const active = new AbortController();
       controller = active;
       api
-        .dailyFocusPool(windowSessions, active.signal)
+        .dailyFocusPool(windowSessions, windowEndDate, active.signal)
         .then((next) => {
           setPayload(next);
           setError("");
@@ -1055,15 +1062,22 @@ function DailyFocusPoolPanel({
         });
     };
     load();
-    const interval = window.setInterval(() => load(true), 60_000);
+    // 历史窗口不再变化，只有跟随最新交易日时才需要轮询。
+    const interval = windowEndDate
+      ? null
+      : window.setInterval(() => load(true), 60_000);
     return () => {
       controller?.abort();
-      window.clearInterval(interval);
+      if (interval !== null) window.clearInterval(interval);
     };
-  }, [retryNonce, windowSessions]);
+  }, [retryNonce, windowEndDate, windowSessions]);
 
   const ratioLabel = (value: number | null) =>
     value === null ? "—" : `${(value * 100).toFixed(1)}%`;
+  // 请求发出后立刻高亮被点选的日期，不用等新窗口返回。
+  const activeEndDate = windowEndDate || payload?.window.end || "";
+  const latestTradeDate = payload?.window.latestTradeDate ?? "";
+  const viewingHistory = Boolean(windowEndDate) && windowEndDate !== latestTradeDate;
 
   return (
     <div className="focus-pool-page flex flex-col gap-5">
@@ -1072,7 +1086,8 @@ function DailyFocusPoolPanel({
           <div className="min-w-0">
             <h1 className="text-xl font-semibold tracking-tight">聚焦股票池</h1>
             <p className="mt-1 max-w-3xl text-sm leading-relaxed text-muted-foreground">
-              汇总所选交易日窗口内出现过的全部聚焦股票，逐日展示价格变动，并计算窗口总变动。
+              池内股票全部来自窗口内各交易日的「每日聚焦」名单（含当日预览），
+              再逐日核对涨停池与龙虎榜标注当前时段的龙头，并给出每只股票的趋势判断。
             </p>
           </div>
           <Tabs
@@ -1126,7 +1141,43 @@ function DailyFocusPoolPanel({
             </SelectContent>
           </Select>
         </div>
-        <p>切换窗口后，股票范围、每天涨跌、总变动与趋势判断会同步重算。</p>
+        <div>
+          <label htmlFor="focus-pool-end">截止交易日</label>
+          <Select
+            value={windowEndDate || "__latest__"}
+            onValueChange={(value) =>
+              // 显式选到最新交易日时等同于“最新”，这样轮询与实时预览行为保持一致。
+              setWindowEndDate(
+                value === "__latest__" || value === latestTradeDate ? "" : value,
+              )
+            }
+          >
+            <SelectTrigger
+              id="focus-pool-end"
+              className="h-10 w-[178px] text-xs"
+            >
+              <CalendarDays size={14} />
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="__latest__">
+                最新交易日{latestTradeDate ? `（${latestTradeDate}）` : ""}
+              </SelectItem>
+              {(payload?.window.availableTradeDates ?? []).map((tradeDate) => (
+                <SelectItem value={tradeDate} key={tradeDate}>
+                  {tradeDate}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+        <p>
+          可用窗口内的日期或「截止交易日」切换观察范围，例如点选 09-03
+          即以该日结束窗口；切换后股票范围、每天涨跌、总变动与趋势判断会同步重算。
+        </p>
+        {loading && payload && (
+          <LoadingState label="正在切换观察窗口" />
+        )}
       </section>
 
       {error && !payload ? (
@@ -1150,7 +1201,7 @@ function DailyFocusPoolPanel({
         </section>
       ) : loading && !payload ? (
         <section className="daily-focus-loading">
-          <LoadingState label="正在汇总近 5 个交易日" />
+          <LoadingState label={`正在汇总近 ${windowSessions} 个交易日`} />
           <Skeleton className="mt-5 h-64 w-full" />
         </section>
       ) : payload ? (
@@ -1178,15 +1229,49 @@ function DailyFocusPoolPanel({
             aria-label={`最近${payload.window.sessions}日聚焦股票统计`}
           >
             <div className="focus-pool-window">
-              <span>最近 {payload.window.sessions} 个交易日</span>
+              <div className="focus-pool-window-head">
+                <span>
+                  最近 {payload.window.sessions} 个交易日
+                  {viewingHistory ? " · 历史窗口" : ""}
+                </span>
+                {viewingHistory && (
+                  <button
+                    type="button"
+                    className="focus-pool-reset"
+                    onClick={() => setWindowEndDate("")}
+                  >
+                    回到最新
+                  </button>
+                )}
+              </div>
               <strong>
                 {payload.window.start && payload.window.end
                   ? `${payload.window.start} — ${payload.window.end}`
                   : "等待交易日数据"}
               </strong>
-              <div className="focus-pool-dates" aria-label="窗口交易日">
+              <div
+                className="focus-pool-dates"
+                role="group"
+                aria-label="窗口交易日，可点击选择观察截止日"
+              >
                 {payload.window.tradeDates.map((tradeDate) => (
-                  <time key={tradeDate}>{tradeDate.slice(5)}</time>
+                  <button
+                    type="button"
+                    key={tradeDate}
+                    className={cn(
+                      "focus-pool-date",
+                      tradeDate === activeEndDate && "is-active",
+                    )}
+                    aria-pressed={tradeDate === activeEndDate}
+                    title={`以 ${tradeDate} 作为窗口截止日（最近 ${payload.window.sessions} 个交易日）`}
+                    onClick={() =>
+                      setWindowEndDate(
+                        tradeDate === latestTradeDate ? "" : tradeDate,
+                      )
+                    }
+                  >
+                    {tradeDate.slice(5)}
+                  </button>
                 ))}
               </div>
             </div>
@@ -1218,6 +1303,12 @@ function DailyFocusPoolPanel({
                   : "warning"
               }
             />
+            <PoolMetric
+              label="龙头占比"
+              value={ratioLabel(payload.stats.leaderRatio)}
+              detail={`${payload.stats.leaders} / ${payload.stats.total} 只 · 窗口内曾为市场/行业龙头`}
+              tone={payload.stats.leaders > 0 ? "up" : "neutral"}
+            />
           </section>
 
           {payload.items.length ? (
@@ -1235,7 +1326,7 @@ function DailyFocusPoolPanel({
                   </h2>
                 </div>
                 <p>
-                  热门行业优先排列；每天的涨跌幅按对应交易日行情展示，总变动按窗口内每日涨跌复合计算。
+                  龙头优先排列；每天的涨跌幅按对应交易日行情展示，总变动按窗口内每日涨跌复合计算。
                 </p>
               </div>
               <div className="focus-pool-columns" aria-hidden="true">
@@ -1243,7 +1334,7 @@ function DailyFocusPoolPanel({
                 <span>行业标签</span>
                 <span>每日股价变动</span>
                 <span>总变动</span>
-                <span>趋势判断</span>
+                <span>趋势 / 龙头</span>
               </div>
               <div className="focus-pool-list">
                 {payload.items.map((item) => (
@@ -1268,7 +1359,12 @@ function DailyFocusPoolPanel({
           <footer className="focus-pool-footnote">
             <span>口径</span>
             <p>
-              总变动为所选窗口内每日涨跌幅的复合结果；涨、跌、平天数按每日行情统计。趋势是价格路径的规则化描述，不是收益承诺。
+              股票范围只来自窗口内各交易日已正式冻结的每日聚焦名单
+              {payload.window.livePreviewDate
+                ? `，加上 ${payload.window.livePreviewDate} 的当日预览`
+                : ""}
+              ；总变动为所选窗口内每日涨跌幅的复合结果，涨、跌、平天数按每日行情统计。
+              趋势是价格路径的规则化描述；龙头标记来自涨停池与龙虎榜，且只在该交易日数据通过本地行情核对后才会出现，不是收益承诺。
             </p>
             <time>
               {payload.asOf
@@ -1330,6 +1426,17 @@ function DailyFocusPoolRow({ item }: { item: DailyFocusPoolItemResponse }) {
       <Link to={`/stocks/${item.code}`} className="focus-pool-stock">
         <span>
           <strong>{item.name}</strong>
+          {item.leadership.isLeader ? (
+            <em
+              className={cn(
+                "focus-pool-leader",
+                item.leadership.tier === "market" && "is-market",
+              )}
+              title={item.leadership.reasons.join("；")}
+            >
+              {item.leadership.tier === "market" ? "市场龙头" : "行业龙头"}
+            </em>
+          ) : null}
           {item.isHotIndustry ? <em>热门</em> : null}
         </span>
         <small>
@@ -1397,6 +1504,20 @@ function DailyFocusPoolRow({ item }: { item: DailyFocusPoolItemResponse }) {
       <div className={cn("focus-pool-trend", `focus-pool-trend--${trendTone}`)}>
         <strong>{item.trend.label}</strong>
         <p>{item.trend.summary}</p>
+        <small>
+          {item.leadership.maxBoardCount === null
+            ? "窗口内无涨停记录（涨停池未取证时不作判断）"
+            : `窗口内最高 ${item.leadership.maxBoardCount} 连板${
+                item.leadership.limitUpDates.length
+                  ? ` · 涨停 ${item.leadership.limitUpDates.map((date) => date.slice(5)).join("/")}`
+                  : ""
+              }${item.leadership.lastFirstSealTime ? ` · 最近封板 ${item.leadership.lastFirstSealTime}` : ""}`}
+        </small>
+        {item.leadership.dragonTigerDates.length ? (
+          <small>
+            龙虎榜 {item.leadership.dragonTigerDates.map((date) => date.slice(5)).join("/")}
+          </small>
+        ) : null}
       </div>
     </article>
   );
@@ -2453,15 +2574,15 @@ function DailyFocusPanel({
             {Object.entries(payload.exclusionCounts).length ? (
               Object.entries(payload.exclusionCounts).map(([key, value]) => (
                 <em key={key}>
-                  {key} {value}
+                  {dailyFocusExclusionLabel(key)} {value}
                 </em>
               ))
             ) : (
               <em>无</em>
             )}
             <p>
-              仅 prospective + frozen 的完整 T+3
-              样本计入表现；重建记录始终排除。
+              减持排除依据当日数据窗口内已核验的上市公司公告，命中即不可放宽；
+              仅 prospective + frozen 的完整 T+3 样本计入表现，重建记录始终排除。
             </p>
           </section>
         </>
@@ -2580,6 +2701,91 @@ function QualityDisclosure({ quality }: { quality: Record<string, unknown> }) {
   );
 }
 
+/** 旧冻结记录没有行业新闻字段，返回 undefined 以便界面区分“未留存”和“当日无新闻”。 */
+function industryNewsSignalOf(
+  snapshot: Record<string, unknown>,
+): { count: number; textDirection: number } | null | undefined {
+  if (!("industryNews" in snapshot)) return undefined;
+  const raw = snapshot.industryNews;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+  const record = raw as Record<string, unknown>;
+  const count = asNumber(record.count);
+  const textDirection = asNumber(record.textDirection);
+  return count === null || textDirection === null ? null : { count, textDirection };
+}
+
+/** 行业舆情角度：热门行业的当日新闻列表，以及它在行业共振分里的占比。 */
+function IndustryNewsAngle({
+  industryName,
+  relation,
+  textHeat,
+  signal,
+  evidence,
+}: {
+  industryName: string | null;
+  relation: string | null;
+  textHeat: number | null;
+  signal: { count: number; textDirection: number } | null | undefined;
+  evidence: Record<string, unknown>[] | null;
+}) {
+  if (!industryName)
+    return (
+      <p className="text-xs text-muted-foreground">
+        行业未确认，无法归属行业新闻；本项不计分。
+      </p>
+    );
+  return (
+    <div className="daily-focus-industry-news">
+      <p className="text-xs text-muted-foreground">
+        {industryName}
+        {relation ? ` · ${relation}` : ""}
+        {textHeat === null ? "" : ` · 舆情热度 ${textHeat}`}
+        {signal ? ` · 行业舆情方向 ${signal.textDirection}` : ""}
+      </p>
+      {evidence === null ? (
+        <p className="mt-2 text-xs text-muted-foreground">
+          该冻结记录按旧版口径生成，未留存行业新闻证据。
+        </p>
+      ) : evidence.length ? (
+        <ul className="daily-focus-evidence">
+          {evidence.slice(0, 5).map((item, index) => {
+            const title = asString(item.title) ?? asString(item.source) ?? "行业新闻";
+            const url = asString(item.url);
+            return (
+              <li key={`${asString(item.id) ?? "industry-news"}-${index}`}>
+                {url ? (
+                  <a href={url} target="_blank" rel="noreferrer">
+                    {title}
+                    <ExternalLink size={12} />
+                  </a>
+                ) : (
+                  <span>{title}</span>
+                )}
+                <small>
+                  {item.scope === "industry" ? "行业级新闻" : "成分股新闻"} ·{" "}
+                  {dailyFocusSourceKind(item.sourceKind)} ·{" "}
+                  {asString(item.source) ?? "来源未留存"} ·{" "}
+                  {asString(item.publishedAt)
+                    ? formatDateTime(asString(item.publishedAt)!)
+                    : "时间未留存"}
+                  {!url && " · 原链接未留存"}
+                </small>
+              </li>
+            );
+          })}
+        </ul>
+      ) : (
+        <p className="mt-2 text-xs text-muted-foreground">
+          当日数据窗口内没有该行业的可核验新闻，行业新闻确认记 0 分。
+        </p>
+      )}
+      <p className="mt-2 text-xs text-muted-foreground">
+        行业新闻只读取新闻与公告来源，论坛讨论不计入；条数与方向合计最多 2 分。
+      </p>
+    </div>
+  );
+}
+
 function DailyFocusCandidate({
   item,
   outcome,
@@ -2601,6 +2807,11 @@ function DailyFocusCandidate({
   const mentionDelta = asNumber(discussionGrowth.mentionDelta);
   const growth = asNumber(discussionGrowth.value);
   const industry = asRecord(snapshot.industry);
+  const industryName = asString(industry.name);
+  const industryNewsSignal = industryNewsSignalOf(snapshot);
+  const industryNewsEvidence = Array.isArray(snapshot.industryNewsEvidence)
+    ? snapshot.industryNewsEvidence.map(asRecord)
+    : null;
   const history = Array.isArray(snapshot.amountHistory)
     ? snapshot.amountHistory.flatMap((value) => asNumber(value) ?? [])
     : [];
@@ -2619,6 +2830,7 @@ function DailyFocusCandidate({
       ? (history.at(-1)! / history[0] - 1) * 100
       : null;
   const nextTrend = item.nextDayTrend;
+  const leader = dailyFocusLeadership(snapshot);
   const nextActual = nextTrend.actual;
   const nextTrendText = nextActual
     ? `${nextActual.phase === "closed" ? "收盘" : "盘中"}${nextActual.status === "matched" ? "符合" : nextActual.status === "missed" ? "不符合" : "持平"} ${changeLabel(nextActual.pctChange)}`
@@ -2642,10 +2854,23 @@ function DailyFocusCandidate({
             {String(item.rank).padStart(2, "0")}
           </span>
           <span>
-            <strong>{name}</strong>
+            <span className="daily-focus-name">
+              <strong>{name}</strong>
+              {leader ? (
+                <em
+                  className={cn(
+                    "daily-focus-leader",
+                    leader.tier === "market" && "is-market",
+                  )}
+                  title={leader.reasons.join("；") || leader.label}
+                >
+                  {leader.label}
+                </em>
+              ) : null}
+            </span>
             <small>
-              {item.code}
-              {item.isHotIndustry ? " · 热门行业" : ""}
+              {item.code} ·{" "}
+              {dailyFocusIndustryLabel(industryName, item.isHotIndustry)}
             </small>
             <small>
               {item.reasons.slice(0, 3).join(" · ") || "筛选理由未留存"}
@@ -2664,9 +2889,7 @@ function DailyFocusCandidate({
         </span>
         <strong className="daily-focus-score">
           {item.finalScore.toFixed(1)}
-          <small>
-            {item.baseScore.toFixed(1)} − {item.overheatPenalty.toFixed(1)}
-          </small>
+          <small>{dailyFocusScoreBreakdown(item)}</small>
         </strong>
         <span className="daily-focus-signal">
           <b>{textDirection ?? "—"}</b>
@@ -2675,6 +2898,14 @@ function DailyFocusCandidate({
             {mentionDelta === null
               ? ""
               : ` · 增量 ${mentionDelta >= 0 ? "+" : ""}${mentionDelta}`}
+          </small>
+          <small>
+            行业舆情{" "}
+            {industryNewsEvidence === null
+              ? "未留存"
+              : industryNewsEvidence.length
+                ? `${industryNewsEvidence.length} 条`
+                : "无行业新闻"}
           </small>
         </span>
         <span className="daily-focus-market">
@@ -2752,10 +2983,28 @@ function DailyFocusCandidate({
               原始 {item.baseScore.toFixed(1)} − 过热扣分{" "}
               {item.overheatPenalty.toFixed(1)} = {item.finalScore.toFixed(1)}
             </p>
+            {industryName && industryNewsSignal !== undefined && (
+              <p className="mt-1 text-xs text-muted-foreground">
+                行业共振 {(item.scores.industry ?? 0).toFixed(1)} / 12：其中行业新闻确认{" "}
+                {industryNewsScore(industryNewsSignal).toFixed(1)} 分（条数 1 分 + 方向 1 分）。
+              </p>
+            )}
           </section>
           <section>
             <p className="daily-focus-kicker">冻结原始输入</p>
             <RawSnapshot snapshot={snapshot} industry={industry} />
+          </section>
+          <section>
+            <p className="daily-focus-kicker">
+              行业舆情{industryName ? ` · ${industryName}` : ""}
+            </p>
+            <IndustryNewsAngle
+              industryName={industryName}
+              relation={asString(industry.relation)}
+              textHeat={asNumber(industry.textHeat)}
+              signal={industryNewsSignal}
+              evidence={industryNewsEvidence}
+            />
           </section>
           <section>
             <p className="daily-focus-kicker">5 日成交额</p>
@@ -2783,6 +3032,10 @@ function DailyFocusCandidate({
             />
           </section>
           <section>
+            <p className="daily-focus-kicker">龙头数据（涨停池 / 龙虎榜）</p>
+            <LeadershipAudit snapshot={snapshot} />
+          </section>
+          <section>
             <p className="daily-focus-kicker">来源证据</p>
             <EvidenceLinks evidence={evidence} />
           </section>
@@ -2797,6 +3050,66 @@ function DailyFocusCandidate({
         </div>
       </div>
     </article>
+  );
+}
+
+/** 龙头依据：只陈述涨停池/龙虎榜的可核验事实，未取证时明确说明而不是留空。 */
+function LeadershipAudit({ snapshot }: { snapshot: Record<string, unknown> }) {
+  const leadership = dailyFocusLeadership(snapshot);
+  const raw = asRecord(snapshot.leadership);
+  const boardCount = asNumber(raw.boardCount);
+  const dragonTiger = asRecord(raw.dragonTiger);
+  const netAmount = asNumber(dragonTiger.netAmount);
+  if (!Object.keys(raw).length)
+    return (
+      <p className="text-xs leading-relaxed text-muted-foreground">
+        当日涨停池与龙虎榜未取证，本次不加龙头分；这不代表该股不是龙头。
+      </p>
+    );
+  return (
+    <dl className="daily-focus-baseline">
+      <div>
+        <dt>龙头判定</dt>
+        <dd className={cn(leadership && "text-up")}>
+          {leadership ? leadership.label : "未达龙头标准"}
+        </dd>
+      </div>
+      <div>
+        <dt>连板高度</dt>
+        <dd>{boardCount === null ? "当日未涨停" : `${boardCount} 板`}</dd>
+      </div>
+      <div>
+        <dt>首次封板</dt>
+        <dd>{asString(raw.firstSealTime) ?? "—"}</dd>
+      </div>
+      <div>
+        <dt>炸板次数</dt>
+        <dd>{asNumber(raw.breakCount) ?? "—"}</dd>
+      </div>
+      <div>
+        <dt>行业涨停家数</dt>
+        <dd>{asNumber(raw.industryLimitUps) ?? "—"}</dd>
+      </div>
+      <div>
+        <dt>龙虎榜净买</dt>
+        <dd>
+          {netAmount === null
+            ? "未上榜"
+            : `${netAmount >= 0 ? "+" : "-"}${(Math.abs(netAmount) / 1e4).toFixed(0)} 万元`}
+        </dd>
+      </div>
+      {leadership ? (
+        <div>
+          <dt>龙头加分</dt>
+          <dd className="text-up">+{leadership.bonus.toFixed(1)}</dd>
+        </div>
+      ) : null}
+      <p>
+        {leadership?.reasons.length
+          ? `依据：${leadership.reasons.join("；")}。首板不标龙头；加分只使用当日可核验的涨停与龙虎榜事实。`
+          : "首板不标龙头；加分只使用当日可核验的涨停与龙虎榜事实。"}
+      </p>
+    </dl>
   );
 }
 

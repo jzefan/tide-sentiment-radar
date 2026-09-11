@@ -16,7 +16,8 @@ import { stopWeiboLiveSession } from "./weiboBrowser.ts";
 import { getDailyCandidatePerformance, withFrozenBenchmarkIndustryLabels, withNextTradingDayTrends } from "./dailyCandidateService.ts";
 import { isTradingSession } from "../src/domain/marketCalendar.ts";
 import { getConvertibleBonds, isConvertibleBondSort, type ConvertibleBondView } from "./convertibleBonds.ts";
-import { getDailyFocusPool } from "./dailyFocusPoolService.ts";
+import { getDailyFocusPool, listFocusPoolTradeDates, type LiveDailyFocusPoolList } from "./dailyFocusPoolService.ts";
+import { leadershipCoverage } from "./leadershipSync.ts";
 import type { DailyFocusPoolWindowSessions } from "./dailyFocusPool.ts";
 
 loadXueqiuCookie();
@@ -279,10 +280,20 @@ async function routeApi(request: IncomingMessage, response: ServerResponse, url:
     const rawSessions = url.searchParams.get("sessions") ?? "5";
     if (!new Set(["2", "3", "4", "5"]).has(rawSessions)) return json(response, 400, { code: "BAD_FOCUS_POOL_WINDOW", message: "sessions 仅支持 2、3、4 或 5", requestId });
     const windowSessions = Number(rawSessions) as DailyFocusPoolWindowSessions;
-    const snapshot = await buildRadarSnapshot(watchlist);
-    const stored = getDailyCandidateList(snapshot.tradeDate);
-    const live = stored?.status === "frozen" ? null : await buildDailyCandidatePreviewFromRadar(watchlist);
-    return json(response, 200, getDailyFocusPool(windowSessions, live ? { tradeDate: live.tradeDate, items: live.items } : null));
+    const windowEndDate = url.searchParams.get("date");
+    if (windowEndDate !== null && !isRealCalendarDate(windowEndDate)) return json(response, 400, { code: "BAD_DATE", message: "date 必须是有效日历日期 YYYY-MM-DD", requestId });
+    const poolDates = listFocusPoolTradeDates();
+    if (windowEndDate && !poolDates.includes(windowEndDate)) return json(response, 404, { code: "NO_FOCUS_POOL_DATE", message: `交易日（${windowEndDate}）没有已留存的行情记录`, requestId });
+    // 历史窗口直接读留存数据；只有窗口末端就是最新交易日时才需要实时快照与盘中预览。
+    const latestTradeDate = poolDates[0] ?? null;
+    let live: LiveDailyFocusPoolList | null = null;
+    if (!windowEndDate || windowEndDate === latestTradeDate) {
+      const snapshot = await buildRadarSnapshot(watchlist);
+      const stored = getDailyCandidateList(snapshot.tradeDate);
+      const preview = stored?.status === "frozen" ? null : await buildDailyCandidatePreviewFromRadar(watchlist);
+      if (preview) live = { tradeDate: preview.tradeDate, items: preview.items };
+    }
+    return json(response, 200, getDailyFocusPool(windowSessions, live, windowEndDate));
   }
 
   if (request.method === "GET" && url.pathname === "/api/daily-candidates/performance") {
@@ -429,6 +440,10 @@ async function systemStatus(force: boolean) {
   const fallbackDiscussionSources = defaultDiscussionSources();
   const byId = new Map((snapshot?.discussionSources ?? []).map((source) => [source.id, source]));
   const discussionSources = fallbackDiscussionSources.map((source) => byId.get(source.id) ?? source);
+  // 龙头数据源状态：逐日展示最近 5 个交易日的涨停池与龙虎榜取证情况。
+  const leadershipRecent = leadershipCoverage(listTradeDates().slice(0, 5));
+  const leadershipState = (verification: string) => verification === "verified" || verification === "empty" ? "connected" as const : "degraded" as const;
+  const leadershipLatest = leadershipRecent[0];
   return {
     mode: snapshot ? (partial ? "partial" : "live") : "unavailable",
     snapshotAsOf: snapshot?.asOf ?? new Date().toISOString(),
@@ -444,6 +459,8 @@ async function systemStatus(force: boolean) {
       { id: "history", name: "东方财富历史日线", description: (historyState?.metadata && (historyState.metadata as { provider?: string }).provider === "tencent-mirror") ? "东财历史主机在当前网络不可达，由腾讯行情镜像回填同一交易所公开行情" : "打开个股时按需回填真实日线，并先保存到本地数据库", kind: "market", state: historyState?.state ?? "disabled", lastSync: historyState?.lastSuccessAt ?? "尚未回填", records: historyState ? `最近回填 ${historyState.lastRecordCount} 条` : "0 条" },
       { id: "news", name: "财经快讯", description: "面向全市场持续获取公开财经快讯，并保留直接关联股票", kind: "news", state: snapshot && !snapshot.clueFailures.includes("财经快讯") ? "connected" : "degraded", lastSync: lastSync ?? "连接失败", records: snapshot ? `${snapshot.events.filter((event) => event.sourceKind === "news").length} 条当前线索` : "0 条" },
       { id: "announcement", name: "上市公司公告", description: "获取全市场最新公司公告及公告类别", kind: "announcement", state: snapshot && !snapshot.clueFailures.includes("公司公告") ? "connected" : "degraded", lastSync: lastSync ?? "连接失败", records: snapshot ? `${snapshot.events.filter((event) => event.sourceKind === "announcement").length} 条当前线索` : "0 条" },
+      { id: "limit-up-pool", name: "东方财富涨停板池", description: "逐日获取连板数、首次/最后封板时间与炸板次数；入库前必须与本地同日行情逐条比对，比对不通过整批拒绝", kind: "market", state: leadershipState(leadershipLatest?.verification ?? "unverified"), lastSync: leadershipLatest?.fetchedAt || "尚未取证", records: leadershipLatest ? `${leadershipLatest.poolCount} 只涨停 · ${leadershipRecent.filter((item) => item.verification === "verified").length}/${leadershipRecent.length} 日已取证` : "0 条", repository: "https://quote.eastmoney.com/ztb/detail" },
+      { id: "dragon-tiger", name: "东方财富龙虎榜", description: "逐日获取当日上榜原因与席位净买额；同一股票多个原因只保留净买额绝对值最大的一条，避免重复累加", kind: "market", state: leadershipState(leadershipLatest?.verification ?? "unverified"), lastSync: leadershipLatest?.fetchedAt || "尚未取证", records: leadershipLatest ? `${leadershipLatest.billboardCount} 只上榜` : "0 条", repository: "https://data.eastmoney.com/stock/tradedetail.html" },
       ...discussionSources.map((source) => ({ id: source.id, name: source.name, description: source.detail, kind: "forum" as const, state: source.state, lastSync: source.state === "connected" ? (lastSync ?? "刚刚") : source.state === "disabled" ? "未启用" : "连接受限", records: `${source.count} 条用户讨论` })),
       ...(snapshot?.forumEnabled ? [{ id: "licensed-forum", name: snapshot.forumSource, description: "按书面许可协议获取的论坛线索，不保存用户身份", kind: "forum" as const, state: snapshot.clueFailures.includes("授权论坛源") ? "degraded" as const : "connected" as const, lastSync: lastSync ?? "连接失败", records: `${snapshot.events.filter((event) => event.sourceKind === "forum").length} 条当前线索`, licenseId: snapshot.forumLicenseId ?? undefined, termsUrl: snapshot.forumTermsUrl ?? undefined }] : []),
     ],

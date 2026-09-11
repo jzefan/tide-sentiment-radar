@@ -6,6 +6,8 @@ import {
   type DailyCandidateEntry,
 } from "./database.ts";
 import { buildDailyFocusPool, type DailyFocusPoolQuote, type DailyFocusPoolResponse, type DailyFocusPoolWindowSessions } from "./dailyFocusPool.ts";
+import { readLeadershipDayRows } from "./leadershipSync.ts";
+import { normalizeIndustryName } from "./industry.ts";
 
 export interface LiveDailyFocusPoolList {
   tradeDate: string;
@@ -14,9 +16,21 @@ export interface LiveDailyFocusPoolList {
 
 const record = (value: unknown): Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 
-/** Builds the current five-session short-trading pool. Historical reconstructions stay excluded. */
-export function getDailyFocusPool(windowSessions: DailyFocusPoolWindowSessions = 5, liveList?: LiveDailyFocusPoolList | null): DailyFocusPoolResponse {
-  const tradeDates = listTradeDates().slice(0, windowSessions).sort();
+/** 可用于选择观察截止日的交易日（倒序，含最新）。 */
+export function listFocusPoolTradeDates(): string[] {
+  return [...new Set(listTradeDates())].sort().reverse();
+}
+
+/**
+ * Builds the current short-trading pool. Historical reconstructions stay excluded.
+ * `windowEndDate` anchors the window on any retained trading day; omitting it keeps the latest window.
+ */
+export function getDailyFocusPool(windowSessions: DailyFocusPoolWindowSessions = 5, liveList?: LiveDailyFocusPoolList | null, windowEndDate?: string | null): DailyFocusPoolResponse {
+  const availableTradeDates = listFocusPoolTradeDates();
+  const anchorDate = windowEndDate && availableTradeDates.includes(windowEndDate) ? windowEndDate : null;
+  // 只取窗口内的行情，避免为了看历史窗口而读入全部交易日。
+  const eligible = anchorDate ? availableTradeDates.filter((date) => date <= anchorDate) : availableTradeDates;
+  const tradeDates = eligible.slice(0, windowSessions).sort();
   const listByDate = new Map(listDailyCandidateLists()
     .filter((list) => tradeDates.includes(list.tradeDate) && list.status === "frozen")
     .map((list) => [list.tradeDate, { tradeDate: list.tradeDate, items: list.items }]));
@@ -47,5 +61,24 @@ export function getDailyFocusPool(windowSessions: DailyFocusPoolWindowSessions =
     name: link.industryName,
     relevance: link.relevance,
   }))]));
-  return buildDailyFocusPool({ tradeDates, windowSessions, lists, quotesByDate, clueIndustriesById });
+  // 龙头事实按窗口逐日读取：未取证的日期不参与标注，池子不会凭空出现“龙头”。
+  const leadershipByDate = new Map<string, ReturnType<typeof readLeadershipDayRows>>();
+  for (const tradeDate of tradeDates) {
+    const quotes = quotesByDate.get(tradeDate) ?? [];
+    const industryByCode = new Map(quotes.map((quote) => [quote.code, normalizeIndustryName(quote.industryName)]));
+    const rows = readLeadershipDayRows(tradeDate, industryByCode);
+    if (rows.length) leadershipByDate.set(tradeDate, rows);
+  }
+  return buildDailyFocusPool({
+    tradeDates,
+    windowSessions,
+    windowEndDate: anchorDate,
+    availableTradeDates,
+    latestTradeDate: availableTradeDates[0] ?? null,
+    livePreviewDate: liveList?.tradeDate ?? null,
+    lists,
+    quotesByDate,
+    clueIndustriesById,
+    leadershipByDate,
+  });
 }

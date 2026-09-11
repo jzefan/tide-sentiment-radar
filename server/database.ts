@@ -23,6 +23,7 @@ import {
   type IndustryRecord,
   type StockIndustryMembership,
 } from "./industry.ts";
+import type { DragonTigerRecord, LimitUpRecord } from "./leadership.ts";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const dataDir = join(root, "data");
@@ -655,6 +656,70 @@ if (schemaVersion < 16) {
       CREATE INDEX IF NOT EXISTS board_limit_metadata_lookup
         ON board_limit_metadata(code, effective_from DESC, effective_to);
       PRAGMA user_version = 16;
+      COMMIT;
+    `);
+  } catch (error) {
+    database.exec("ROLLBACK;");
+    throw error;
+  }
+}
+
+/** v17：涨停板池与龙虎榜按交易日留档，作为「当前时段龙头」的可核验外部依据。 */
+if (schemaVersion < 17) {
+  database.exec("BEGIN IMMEDIATE;");
+  try {
+    database.exec(`
+      CREATE TABLE IF NOT EXISTS daily_limit_up_pool (
+        code TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        name TEXT NOT NULL,
+        exchange TEXT NOT NULL CHECK(exchange IN ('SH', 'SZ', 'BJ')),
+        close REAL,
+        pct_change REAL,
+        amount REAL,
+        turnover REAL,
+        float_market_cap REAL,
+        board_count INTEGER NOT NULL,
+        stat_days INTEGER,
+        stat_count INTEGER,
+        first_seal_time TEXT,
+        last_seal_time TEXT,
+        break_count INTEGER NOT NULL,
+        seal_amount REAL,
+        industry_name TEXT,
+        source_url TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY(code, trade_date)
+      );
+      CREATE INDEX IF NOT EXISTS daily_limit_up_pool_board
+        ON daily_limit_up_pool(trade_date, board_count DESC);
+      CREATE TABLE IF NOT EXISTS daily_dragon_tiger (
+        code TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        name TEXT NOT NULL,
+        close REAL,
+        pct_change REAL,
+        net_amount REAL,
+        buy_amount REAL,
+        sell_amount REAL,
+        deal_amount REAL,
+        turnover REAL,
+        reasons_json TEXT NOT NULL,
+        explanations_json TEXT NOT NULL,
+        list_count INTEGER NOT NULL,
+        source_url TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY(code, trade_date)
+      );
+      CREATE TABLE IF NOT EXISTS leadership_sync_state (
+        trade_date TEXT PRIMARY KEY,
+        fetched_at TEXT NOT NULL,
+        pool_count INTEGER NOT NULL,
+        billboard_count INTEGER NOT NULL,
+        verification TEXT NOT NULL CHECK(verification IN ('verified', 'unverified', 'empty')),
+        note TEXT
+      );
+      PRAGMA user_version = 17;
       COMMIT;
     `);
   } catch (error) {
@@ -1814,6 +1879,154 @@ export function getMarketQuotesByTradeDate(tradeDate: string): EastMoneyMarketQu
     WHERE q.trade_date = ?
     ORDER BY q.code
   `).all(tradeDate) as Array<Record<string, unknown>>).map(marketQuoteFromRow);
+}
+
+export type LeadershipVerificationState = "verified" | "unverified" | "empty";
+
+export interface LeadershipSyncStateRow {
+  tradeDate: string;
+  fetchedAt: string;
+  poolCount: number;
+  billboardCount: number;
+  verification: LeadershipVerificationState;
+  note: string | null;
+}
+
+/** 逐日龙头事实的读表映射；空值统一走通用 `nullableNumber` / `nullableString`。 */
+function limitUpFromRow(row: Record<string, unknown>): LimitUpRecord {
+  return {
+    code: String(row.code),
+    name: String(row.name),
+    exchange: String(row.exchange) as LimitUpRecord["exchange"],
+    tradeDate: String(row.trade_date),
+    close: nullableNumber(row.close),
+    pctChange: nullableNumber(row.pct_change),
+    amount: nullableNumber(row.amount),
+    turnover: nullableNumber(row.turnover),
+    floatMarketCap: nullableNumber(row.float_market_cap),
+    boardCount: Number(row.board_count),
+    statDays: nullableNumber(row.stat_days),
+    statCount: nullableNumber(row.stat_count),
+    firstSealTime: nullableString(row.first_seal_time),
+    lastSealTime: nullableString(row.last_seal_time),
+    breakCount: Number(row.break_count),
+    sealAmount: nullableNumber(row.seal_amount),
+    industryName: nullableString(row.industry_name),
+    sourceUrl: String(row.source_url),
+  };
+}
+
+function dragonTigerFromRow(row: Record<string, unknown>): DragonTigerRecord {
+  return {
+    code: String(row.code),
+    name: String(row.name),
+    tradeDate: String(row.trade_date),
+    close: nullableNumber(row.close),
+    pctChange: nullableNumber(row.pct_change),
+    netAmount: nullableNumber(row.net_amount),
+    buyAmount: nullableNumber(row.buy_amount),
+    sellAmount: nullableNumber(row.sell_amount),
+    dealAmount: nullableNumber(row.deal_amount),
+    turnover: nullableNumber(row.turnover),
+    reasons: parseStringArray(row.reasons_json),
+    explanations: parseStringArray(row.explanations_json),
+    listCount: Number(row.list_count),
+    sourceUrl: String(row.source_url),
+  };
+}
+
+function parseStringArray(value: unknown): string[] {
+  try {
+    const parsed = JSON.parse(String(value));
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * 原子替换某个交易日的涨停池与龙虎榜，并记录取证状态。
+ * 只有通过本地行情核对的批次才会以 verified 写入；无法证明日期的批次保留状态但不覆盖数据。
+ */
+export function saveDailyLeadership(input: {
+  tradeDate: string;
+  limitUp: LimitUpRecord[];
+  dragonTiger: DragonTigerRecord[];
+  verification: LeadershipVerificationState;
+  note: string | null;
+  fetchedAt?: string;
+}): void {
+  const fetchedAt = input.fetchedAt ?? new Date().toISOString();
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (input.verification === "verified") {
+      database.prepare("DELETE FROM daily_limit_up_pool WHERE trade_date = ?").run(input.tradeDate);
+      database.prepare("DELETE FROM daily_dragon_tiger WHERE trade_date = ?").run(input.tradeDate);
+      const insertLimitUp = database.prepare(`
+        INSERT INTO daily_limit_up_pool(
+          code, trade_date, name, exchange, close, pct_change, amount, turnover, float_market_cap,
+          board_count, stat_days, stat_count, first_seal_time, last_seal_time, break_count, seal_amount,
+          industry_name, source_url, fetched_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of input.limitUp) {
+        insertLimitUp.run(row.code, input.tradeDate, row.name, row.exchange, row.close, row.pctChange, row.amount, row.turnover, row.floatMarketCap, row.boardCount, row.statDays, row.statCount, row.firstSealTime, row.lastSealTime, row.breakCount, row.sealAmount, row.industryName, row.sourceUrl, fetchedAt);
+      }
+      const insertDragonTiger = database.prepare(`
+        INSERT INTO daily_dragon_tiger(
+          code, trade_date, name, close, pct_change, net_amount, buy_amount, sell_amount, deal_amount,
+          turnover, reasons_json, explanations_json, list_count, source_url, fetched_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `);
+      for (const row of input.dragonTiger) {
+        insertDragonTiger.run(row.code, input.tradeDate, row.name, row.close, row.pctChange, row.netAmount, row.buyAmount, row.sellAmount, row.dealAmount, row.turnover, JSON.stringify(row.reasons), JSON.stringify(row.explanations), row.listCount, row.sourceUrl, fetchedAt);
+      }
+    }
+    database.prepare(`
+      INSERT INTO leadership_sync_state(trade_date, fetched_at, pool_count, billboard_count, verification, note)
+      VALUES (?, ?, ?, ?, ?, ?)
+      ON CONFLICT(trade_date) DO UPDATE SET
+        fetched_at = excluded.fetched_at,
+        pool_count = excluded.pool_count,
+        billboard_count = excluded.billboard_count,
+        verification = excluded.verification,
+        note = excluded.note
+    `).run(input.tradeDate, fetchedAt, input.limitUp.length, input.dragonTiger.length, input.verification, input.note);
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    throw error;
+  }
+}
+
+/** 读取若干交易日的取证状态（含失败记录），用于跳过重复抓取与展示数据源状态。 */
+export function getLeadershipSyncState(tradeDates: string[]): LeadershipSyncStateRow[] {
+  if (!tradeDates.length) return [];
+  const placeholders = tradeDates.map(() => "?").join(", ");
+  return (database.prepare(`
+    SELECT * FROM leadership_sync_state WHERE trade_date IN (${placeholders})
+  `).all(...tradeDates) as Array<Record<string, unknown>>).map((row) => ({
+    tradeDate: String(row.trade_date),
+    fetchedAt: String(row.fetched_at),
+    poolCount: Number(row.pool_count),
+    billboardCount: Number(row.billboard_count),
+    verification: String(row.verification) as LeadershipVerificationState,
+    note: nullableString(row.note),
+  }));
+}
+
+export function getLimitUpPoolByTradeDate(tradeDate: string): LimitUpRecord[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)) throw new Error("交易日必须是 YYYY-MM-DD");
+  return (database.prepare(`
+    SELECT * FROM daily_limit_up_pool WHERE trade_date = ? ORDER BY board_count DESC, code
+  `).all(tradeDate) as Array<Record<string, unknown>>).map(limitUpFromRow);
+}
+
+export function getDragonTigerByTradeDate(tradeDate: string): DragonTigerRecord[] {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(tradeDate)) throw new Error("交易日必须是 YYYY-MM-DD");
+  return (database.prepare(`
+    SELECT * FROM daily_dragon_tiger WHERE trade_date = ? ORDER BY code
+  `).all(tradeDate) as Array<Record<string, unknown>>).map(dragonTigerFromRow);
 }
 
 /** 原子写入某个交易日的每日舆情快照（upsert，同股票同日只保留最新一次聚合结果）。 */

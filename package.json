@@ -16,7 +16,8 @@
     "xueqiu:probe": "tsx scripts/probe-xueqiu.ts",
     "xueqiu:session": "tsx scripts/read-xueqiu-session.ts",
     "xueqiu:verify": "tsx scripts/verify-xueqiu-cookie.ts",
-    "xueqiu:sync": "tsx scripts/sync-xueqiu.ts"
+    "xueqiu:sync": "tsx scripts/sync-xueqiu.ts",
+    "leadership:probe": "tsx scripts/probe-leadership.ts"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.23",

@@ -6,6 +6,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 type Database = typeof import("./database.ts");
+const { DAILY_FOCUS_VERSION } = await import("./dailyCandidateStrategy.ts");
 
 const at = (value: string) => new Date(value);
 const cutoff = "2026-08-25T07:00:00.000Z"; // 15:00 Asia/Shanghai
@@ -451,7 +452,7 @@ test("daily candidate service previews, freezes once, and records unavailable de
       items: [],
     });
     const recoveredFrozen = service.maybeFreezeDailyCandidates(degradedMarketSource, at(`${tradeDate}T07:31:00.000Z`));
-    assert.equal(recoveredFrozen?.methodologyVersion, "daily-focus-v3", "the current methodology can recover a prior empty unavailable record");
+    assert.equal(recoveredFrozen?.methodologyVersion, DAILY_FOCUS_VERSION, "the current methodology can recover a prior empty unavailable record");
     assert.equal(recoveredFrozen?.status, "frozen", "a complete post-close all-market batch freezes even when its wall-clock cache, text sources, and board metadata are degraded");
     assert.equal(recoveredFrozen?.items.length, 3, "market-qualified stocks freeze without requiring text or discussion coverage");
     assert.equal((recoveredFrozen?.dataQuality as any).market, "close-complete-stored");
@@ -517,5 +518,108 @@ test("4000-quote market freezes from three verified candidate windows while unco
     assert.equal(preview.items.some((item: any) => item.code === "600004"), false, "clean but uncovered stock is excluded from selection");
     assert.ok((preview.items[0]!.snapshot as any).marketExcess < 5, "uncovered clean stock still participates in the market reference");
     assert.equal(service.maybeFreezeDailyCandidates(input, at("2026-08-25T07:10:00.000Z"))?.status, "frozen");
+  });
+});
+
+test("daily focus excludes verified share reductions and treats hot-industry news as its own angle", async () => {
+  await withService(async (service, _database, raw) => {
+    prepareHistory(raw);
+    const base = source();
+    const reduction = {
+      id: "announcement-reduction-600001", title: "股票600001:关于控股股东、实际控制人减持股份的预披露公告", category: "公司公告", eventType: "公司",
+      publishedAt: "2026-08-25T06:40:00.000Z", source: "上市公司公告", sourceKind: "announcement", url: "https://evidence.example.test/reduction",
+      adapterId: "eastmoney-announcements", tone: "negative", confidence: 95, heat: 70, summary: "", topics: [],
+      relatedStocks: [{ code: "600001", name: "股票600001", relevance: 96, reason: "线索源直接标注该股票", tone: "negative" }], corroboration: 1,
+    };
+    const industryNews = {
+      id: "fast-news-electronics", title: "电子板块午后走强 多只半导体个股拉升", category: "新闻事件", eventType: "未分类",
+      publishedAt: "2026-08-25T06:20:00.000Z", source: "东方财富财经快讯", sourceKind: "news", url: "https://evidence.example.test/industry",
+      adapterId: "eastmoney-fast-news", tone: "positive", confidence: 80, heat: 70, summary: "", topics: [],
+      relatedStocks: [], corroboration: 1,
+    };
+    const withClues = (events: unknown[]) => source({
+      events,
+      sourceStates: [
+        ...base.sourceStates.map((state: any) => state.id === "eastmoney-announcements" ? { ...state, eventIds: [...state.eventIds, reduction.id] } : state),
+        { id: "eastmoney-fast-news", role: "authority", state: "connected", coveredThrough: cutoff, observedAt: cutoff, queryFrom: "2026-08-24T07:00:00.000Z", queryTo: cutoff, coveredCodes: [], eventIds: [industryNews.id] },
+      ],
+    });
+
+    const plain = service.buildDailyCandidatePreview(withClues([...base.events, industryNews]), at("2026-08-25T07:00:00.000Z"));
+    const excluded = service.buildDailyCandidatePreview(withClues([...base.events, industryNews, reduction]), at("2026-08-25T07:00:00.000Z"));
+
+    assert.equal(excluded.exclusionCounts.majorShareReduction, 1, "a controlling-shareholder reduction is counted as a major reduction exclusion");
+    assert.equal(excluded.exclusionCounts.shareReduction, undefined, "the same stock is not double-counted under the ordinary reduction gate");
+    assert.equal(excluded.items.some((item: any) => item.code === "600001"), false, "a stock with a verified reduction announcement never enters the candidate list");
+    assert.equal(plain.items.some((item: any) => item.code === "600001"), true, "the same stock is a normal candidate without the reduction announcement");
+    assert.ok(
+      (excluded.dataQuality.shareReductionExclusions as string[]).some((line: string) => line.includes("600001") && line.includes("大幅减持")),
+      "the frozen audit lists who was removed and why instead of silently dropping them",
+    );
+
+    const industryItem = plain.items.find((item: any) => item.code === "600002")!;
+    const angle = industryItem.snapshot.industryNewsEvidence as Array<{ id: string; scope: string; url?: string }>;
+    assert.ok(industryItem.snapshot.industryNews.count >= 1, "hot-industry news becomes an explicit sentiment angle on the candidate");
+    assert.equal(angle[0]!.id, "fast-news-electronics", "market-wide industry headlines are listed before constituent news");
+    assert.equal(angle[0]!.scope, "industry", "a market-wide headline naming the industry is attributed to the industry, not to a single stock");
+    assert.equal(angle[0]!.url, "https://evidence.example.test/industry", "the angle keeps the original source link for review");
+    assert.ok(angle.some((item) => item.scope === "constituent" && item.id.startsWith("news-")), "constituent stock news stays visible but is marked as such");
+    assert.ok((industryItem.reasons as string[]).some((reason) => reason.includes("行业：电子")), "selection reasons name the concrete industry");
+    assert.ok(industryItem.scores.industry <= 12, "the industry-news angle stays inside the twelve industry points");
+
+    const withoutIndustryNews = service.buildDailyCandidatePreview(withClues(base.events), at("2026-08-25T07:00:00.000Z"));
+    const scored = (payload: any) => payload.items.find((item: any) => item.code === "600002")!.scores.industry;
+    assert.ok(scored(plain) > scored(withoutIndustryNews), "industry-news confirmation contributes to the industry score instead of being decorative");
+  });
+});
+
+test("wires certified limit-up and dragon-tiger facts into candidate scoring, reasons, and audit", async () => {
+  await withService(async (service) => {
+    const base = source();
+    const leadershipRow = (code: string, boardCount: number, firstSealTime: string, industryName: string, dragonTiger = false) => ({
+      code, name: `股票${code}`, tradeDate: "2026-08-25", industryName, boardCount, firstSealTime, lastSealTime: firstSealTime,
+      breakCount: 0, sealAmount: 80_000_000, amount: 1_500_000_000,
+      dragonTiger: dragonTiger ? { netAmount: 60_000_000, buyAmount: 90_000_000, sellAmount: 30_000_000, reasons: ["日涨幅偏离值达到7%的前5只证券"], listCount: 1 } : null,
+    });
+    const withLeadership = service.buildDailyCandidatePreview(source({
+      leadership: {
+        tradeDate: "2026-08-25",
+        rows: [
+          leadershipRow("600001", 4, "09:25:00", "电子", true),
+          leadershipRow("600002", 2, "10:05:00", "电子"),
+          leadershipRow("600003", 1, "13:40:00", "电子"),
+        ],
+      },
+    }), at("2026-08-25T07:00:00.000Z"));
+    const withoutLeadership = service.buildDailyCandidatePreview(base, at("2026-08-25T07:00:00.000Z"));
+
+    const leader = withLeadership.items.find((item: any) => item.code === "600001")!;
+    assert.equal(leader.snapshot.leadership.tier, "market");
+    assert.equal(leader.snapshot.leadership.label, "4 连板 · 市场龙头");
+    assert.ok(leader.snapshot.leadership.bonus > 0, "龙头加分随快照留档");
+    assert.equal(leader.snapshot.leadership.industryLimitUps, 3, "行业涨停家数按候选集合统计");
+    assert.ok((leader.reasons as string[]).some((reason) => reason.includes("龙头：4 连板 · 市场龙头")), "入选理由必须写出龙头判定");
+
+    const industry = withLeadership.items.find((item: any) => item.code === "600002")!;
+    assert.equal(industry.snapshot.leadership.tier, "industry");
+    assert.equal(industry.snapshot.leadership.label, "2 连板 · 行业龙头");
+
+    const first = withLeadership.items.find((item: any) => item.code === "600003")!;
+    assert.equal(first.snapshot.leadership.tier, "none");
+    assert.equal(first.snapshot.leadership.label, "1 连板");
+    assert.ok(
+      first.snapshot.leadership.bonus > 0 && first.snapshot.leadership.bonus < leader.snapshot.leadership.bonus,
+      "首板只按行业涨停家数拿板块合力分，永远不会达到龙头的高度分",
+    );
+
+    const plain = withoutLeadership.items.find((item: any) => item.code === "600001")!;
+    assert.equal(plain.snapshot.leadership, null, "未取证时快照保持 null 而不是伪造");
+    assert.ok((plain.reasons as string[]).some((reason) => reason === "涨停池/龙虎榜未取证"));
+    assert.ok(leader.finalScore > plain.finalScore, "取证到的龙头事实提高最终分");
+
+    assert.equal(withLeadership.dataQuality.leadership, "available");
+    assert.equal(withLeadership.dataQuality.leadershipRows, 3);
+    assert.deepEqual((withLeadership.dataQuality.leadershipDiagnostics as any).marketLeaders, ["600001"]);
+    assert.equal(withoutLeadership.dataQuality.leadership, "unavailable");
   });
 });

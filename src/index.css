@@ -247,11 +247,16 @@
   .focus-pool-toolbar > p { color: var(--muted-foreground); font-size: .6875rem; line-height: 1.45; text-align: right; }
   .focus-pool-summary { display: grid; grid-template-columns: minmax(17rem, 1.8fr) repeat(4, minmax(7.5rem, 1fr)); border-block: 1px solid var(--border); }
   .focus-pool-window, .focus-pool-metric { min-width: 0; padding: .9rem 1rem; border-right: 1px solid var(--border); }
-  .focus-pool-window > span, .focus-pool-metric dt { color: var(--muted-foreground); font-size: .625rem; letter-spacing: .09em; }
+  .focus-pool-window-head { display: flex; align-items: center; justify-content: space-between; gap: .5rem; }
+  .focus-pool-window-head > span, .focus-pool-window > span, .focus-pool-metric dt { color: var(--muted-foreground); font-size: .625rem; letter-spacing: .09em; }
   .focus-pool-window > strong { display: block; overflow: hidden; margin-top: .32rem; font-size: .8125rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+  .focus-pool-reset { flex: none; color: var(--up); font-size: .5625rem; text-decoration: underline; text-underline-offset: .15rem; transition: color 140ms ease-out; }
+  .focus-pool-reset:hover { color: var(--foreground); }
   .focus-pool-dates { display: flex; gap: .22rem; margin-top: .55rem; }
-  .focus-pool-dates time { flex: 1; min-width: 0; border-top: 2px solid var(--border); padding-top: .28rem; color: var(--muted-foreground); font-size: .5625rem; font-variant-numeric: tabular-nums; text-align: center; }
-  .focus-pool-dates time:last-child { border-color: var(--foreground); color: var(--foreground); }
+  .focus-pool-date { flex: 1; min-width: 0; border-top: 2px solid var(--border); padding: .3rem .1rem .25rem; color: var(--muted-foreground); font-size: .5625rem; font-variant-numeric: tabular-nums; text-align: center; cursor: pointer; transition: color 140ms ease-out, border-color 140ms ease-out, background-color 140ms ease-out; }
+  .focus-pool-date:hover { border-color: color-mix(in oklch, var(--foreground), transparent 40%); background: color-mix(in oklch, var(--muted), transparent 35%); color: var(--foreground); }
+  .focus-pool-date:focus-visible { outline: 2px solid color-mix(in oklch, var(--foreground), transparent 55%); outline-offset: 1px; }
+  .focus-pool-date.is-active { border-color: var(--foreground); background: var(--muted); color: var(--foreground); font-weight: 650; }
   .focus-pool-metric dd { overflow: hidden; margin-top: .3rem; font-size: 1.05rem; font-weight: 650; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .focus-pool-metric p { overflow: hidden; margin-top: .36rem; color: var(--muted-foreground); font-size: .625rem; text-overflow: ellipsis; white-space: nowrap; }
   .focus-pool-metric--up dd { color: var(--up); }
@@ -275,6 +280,8 @@
   .focus-pool-stock > span { display: flex; min-width: 0; align-items: center; gap: .4rem; }
   .focus-pool-stock strong { overflow: hidden; font-size: .875rem; text-overflow: ellipsis; white-space: nowrap; }
   .focus-pool-stock em { flex: none; border: 1px solid color-mix(in oklch, var(--warning), transparent 55%); padding: .08rem .28rem; color: var(--warning); font-size: .5625rem; font-style: normal; font-weight: 650; }
+  .focus-pool-stock em.focus-pool-leader { border-color: color-mix(in oklch, var(--up), transparent 40%); background: color-mix(in oklch, var(--up), transparent 88%); color: var(--up); }
+  .focus-pool-stock em.focus-pool-leader.is-market { border-color: var(--up); background: color-mix(in oklch, var(--up), transparent 78%); }
   .focus-pool-stock small { display: block; overflow: hidden; margin-top: .18rem; color: var(--muted-foreground); font-size: .6rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .focus-pool-stock:hover strong { color: var(--up); }
   .focus-pool-industries { display: flex; min-width: 0; flex-wrap: wrap; gap: .28rem; }
@@ -298,6 +305,7 @@
   .focus-pool-trend { min-width: 0; padding-left: .7rem; border-left: 2px solid var(--border); text-align: right; }
   .focus-pool-trend strong { font-size: .75rem; white-space: nowrap; }
   .focus-pool-trend p { display: -webkit-box; overflow: hidden; margin-top: .2rem; color: var(--muted-foreground); font-size: .6rem; line-height: 1.35; -webkit-box-orient: vertical; -webkit-line-clamp: 2; }
+  .focus-pool-trend small { display: block; overflow: hidden; margin-top: .18rem; color: var(--muted-foreground); font-size: .5625rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .focus-pool-trend--up { border-color: var(--up); }
   .focus-pool-trend--up strong { color: var(--up); }
   .focus-pool-trend--down { border-color: var(--down); }
@@ -357,6 +365,9 @@
   .daily-focus-row { padding: .85rem .75rem; transition: background-color 140ms ease-out; }
   .daily-focus-row:hover { background: color-mix(in oklch, var(--muted), transparent 35%); }
   .daily-focus-stock { display: flex; min-width: 0; align-items: center; gap: .7rem; transition: color 140ms ease-out; }
+  .daily-focus-name { display: flex; min-width: 0; align-items: center; gap: .4rem; }
+  .daily-focus-leader { flex: none; display: inline-block; border: 1px solid color-mix(in oklch, var(--up), transparent 40%); background: color-mix(in oklch, var(--up), transparent 88%); padding: .06rem .3rem; color: var(--up); font-size: .5625rem; font-style: normal; font-weight: 650; }
+  .daily-focus-leader.is-market { border-color: var(--up); background: color-mix(in oklch, var(--up), transparent 78%); }
   .daily-focus-stock:hover { color: var(--up); }
   .daily-focus-stock strong, .daily-focus-stock small, .daily-focus-signal small, .daily-focus-market small, .daily-focus-score small { display: block; }
   .daily-focus-stock strong { overflow: hidden; font-size: .875rem; text-overflow: ellipsis; white-space: nowrap; }

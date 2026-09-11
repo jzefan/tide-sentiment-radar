@@ -21,6 +21,8 @@ import { industryCodeForName, normalizeIndustryName } from "./industry.ts";
 import { buildIndustryAnalytics } from "./industryAnalytics.ts";
 import { buildDailyCandidatePreview, maybeFreezeDailyCandidates, settleDailyCandidateOutcomes, type DailyCandidateSource } from "./dailyCandidateService.ts";
 import { DAILY_FOCUS_MIN_AMOUNT, DAILY_FOCUS_WEIGHTS, winsorizedPercentile, type DailyCandidateScores } from "./dailyCandidateStrategy.ts";
+import { classifyShareReductionText } from "./shareReduction.ts";
+import { ensureLeadershipHistory, readLeadershipDayRows, syncDailyLeadership } from "./leadershipSync.ts";
 
 interface RadarSnapshot {
   quotes: MarketQuote[];
@@ -53,6 +55,8 @@ export interface DailyCandidateHistoryContext {
   quotes: MarketQuote[];
   stocks: StockSnapshot[];
   tradeDate: string;
+  /** 可选：当日线索。用于把正在减持的股票也从盘中关注列表里排除。 */
+  events?: SentimentEvent[];
 }
 
 export interface LiveFocusFallbackItem {
@@ -295,6 +299,8 @@ export function buildDailyCandidateSourceFromRadar(input: {
   const persistedDiscussion = input.discussionWindowsByCode ?? Object.fromEntries(Object.entries(getDailyDiscussionWindows(discussionDates)).map(([code, windows]) => [code, windows
     .filter((window) => window.state === "connected" && window.cursorExhausted)
     .map((window) => ({ ...window, state: "connected" as const, cursorExhausted: true as const, elapsedMinutes: 240, verified: true as const }))]));
+  // 涨停池的行业短名统一换成与候选展示一致的行业口径，避免同一板块出现两种名字。
+  const leadershipIndustryByCode = new Map(input.market.items.map((quote) => [quote.code, normalizeIndustryName(quote.industryName)]));
   return {
     quotes: input.market.items,
     stocks: input.stocks,
@@ -308,6 +314,7 @@ export function buildDailyCandidateSourceFromRadar(input: {
     clueFailures: input.clues.failures,
     sourceStates: input.clues.sourceStates,
     discussionWindowsByCode: persistedDiscussion,
+    leadership: { tradeDate: input.market.tradeDate, rows: readLeadershipDayRows(input.market.tradeDate, leadershipIndustryByCode) },
     recentTradeDates,
     previousTradeDate: recentTradeDates.filter((date) => date < input.market.tradeDate).at(-1) ?? input.market.tradeDate,
     discussionSources: input.clues.discussionSources.map((source) => ({ ...source, coveredThrough: null })),
@@ -345,10 +352,16 @@ export async function buildDailyCandidatePreviewWithHistory(
 /** Always retain useful current-day stock information while formal five-day evidence is incomplete. */
 export function buildLiveFocusFallback(input: DailyCandidateHistoryContext): LiveFocusFallbackItem[] {
   const stockByCode = new Map(input.stocks.map((stock) => [stock.code, stock]));
+  // 盘中关注列表是临时列表，但仍与正式候选使用同一条不可放宽的减持排除，
+  // 避免补齐历史行情期间把正在被股东减持的股票推到页面上。
+  const reductionCodes = new Set((input.events ?? []).flatMap((event) => event.sourceKind === "announcement" && classifyShareReductionText(event.title)
+    ? event.relatedStocks.map((stock) => stock.code)
+    : []));
   const universe = input.quotes
     .filter((quote) => (quote.exchange === "SH" || quote.exchange === "SZ")
       && quote.price > 0
       && quote.amount > 0
+      && !reductionCodes.has(quote.code)
       && !/(?:^|\s)\*?ST(?=\s|[^A-Za-z0-9]|$)|退市/i.test(quote.name));
   const amountReference = universe.map((quote) => quote.amount);
   const priceReference = universe.map((quote) => quote.pctChange);
@@ -500,6 +513,15 @@ async function buildSnapshotFromMarket(market: MarketSyncResult, force: boolean)
   // 三者取并集，确保入选标的确实是“成交活跃 / 涨跌幅显著”的股票，避免小涨小跌、低成交个股混入。
   // 讨论层只对这一集合扫股吧，控制抓取量；讨论层按可配置周期缓存，行情层仍实时。
   const { focusCodes } = selectMovers(market.items);
+  // 龙头事实紧跟行情批次抓取：涨停池要与同一批行情逐条核对才入库，抓取失败只影响龙头加分，
+  // 不影响行情与线索主链路。历史窗口在后台回填，供聚焦股票池逐日标注。
+  try {
+    const leadership = await syncDailyLeadership(market.tradeDate, { quotes: market.items });
+    if (!leadership.skipped) diagLog("leadership", market.tradeDate, leadership.verification, `${leadership.poolCount} 条涨停`, leadership.note ?? "");
+  } catch (error) {
+    diagLog("leadership", "同步失败", error instanceof Error ? error.message : String(error));
+  }
+  void ensureLeadershipHistory(listTradeDates());
   // 股票名称映射：微博等按名称搜索的讨论源使用。
   const stockNames = new Map(market.items.map((quote) => [quote.code, quote.name]));
   const tradeDates = listTradeDates();

@@ -45,6 +45,23 @@ test("excludes BJ, ST, newly listed, suspended, and one-price-limit stocks", () 
   assert.equal(result.exclusionCounts.onePriceLimit, 1);
 });
 
+test("never lets text or discussion compensate for a verified share reduction", () => {
+  const reduction = (level: "major" | "minor") => ({
+    level, title: "示例科技:关于控股股东减持股份的预披露公告", publishedAt: "2026-08-25T02:00:00.000Z", sourceKind: "announcement", matched: ["控股股东"],
+  });
+  const result = selected(
+    base({ code: "600041", shareReduction: reduction("major") }),
+    base({ code: "600042", shareReduction: reduction("minor") }),
+    base({ code: "600043", shareReduction: null }),
+    base({ code: "600044" }),
+    base({ code: "600045" }),
+  );
+  assert.deepEqual(result.items.map((item) => item.code).sort(), ["600043", "600044", "600045"]);
+  assert.equal(result.exclusionCounts.majorShareReduction, 1, "大幅减持单独计数");
+  assert.equal(result.exclusionCounts.shareReduction, 1);
+  assert.equal(result.scored.some((item) => item.code === "600041" || item.code === "600042"), false, "被排除的股票不进入评分榜");
+});
+
 test("keeps market floors hard while treating text and discussion as score inputs", () => {
   const rejected = [
     base({ code: "600009", amount: 99_999_999 }),
@@ -227,10 +244,27 @@ test("awards every sub-item's declared maximum for a fully saturated candidate",
     textDirection: 86, directionConsensus: 100, textConfidence: 100, freshness: 100,
     independentEvents: 5, sourceCount: 3, hasNonForumCorroboration: true,
     industry: { name: industry, textHeat: 100, textDirection: 100, marketStrength: 100, breadth: 100, relation: "舆情交易双热" },
+    industryNews: { count: 3, textDirection: 80 },
   });
   const item = selected(saturated("600171", "甲"), saturated("600172", "乙"), saturated("600173", "丙")).scored[0]!;
   assert.deepEqual(item.scores, { turnover: 30, direction: 18, discussion: 18, price: 18, industry: 12, reliability: 4 });
   assert.equal(item.baseScore, 100);
+});
+
+test("industry news is an explicit angle worth at most two of the twelve industry points", () => {
+  const candidate = (code: string, news: DailyCandidateInput["industryNews"]) => base({
+    code, textDirection: 86, directionConsensus: 100, textConfidence: 100, freshness: 100,
+    independentEvents: 5, sourceCount: 3, hasNonForumCorroboration: true,
+    industry: { name: `行业${code}`, textHeat: 100, textDirection: 100, marketStrength: 100, breadth: 100, relation: "舆情交易双热" },
+    industryNews: news,
+  });
+  const items = selected(candidate("600181", null), candidate("600182", { count: 3, textDirection: 80 })).scored;
+  const withoutNews = items.find((item) => item.code === "600181")!;
+  const withNews = items.find((item) => item.code === "600182")!;
+  // 没有行业新闻时，“行业新闻确认”两项记 0，而不是把缺失当满分。
+  assert.equal(withoutNews.scores.industry, 10);
+  assert.equal(withNews.scores.industry, 12);
+  assert.equal(withNews.scores.industry - withoutNews.scores.industry, 2);
 });
 
 test("uses weak text and discussion as downgrades while retaining the price gate", () => {
@@ -442,4 +476,126 @@ test("returns zero for non-finite winsorized values and supports generic empiric
   assert.equal(winsorizedPercentile(Number.POSITIVE_INFINITY, [1, 2, 3]), 0);
   assert.equal(isAtOrAboveEmpiricalQuantile(8, [1, 2, 3, 4, 5, 6, 7, 8], 0.75), true);
   assert.equal(isAtOrAboveEmpiricalQuantile(5, [1, 2, 3, 4, 5, 6, 7, 8], 0.75), false);
+});
+
+const leadership = (overrides: Partial<NonNullable<DailyCandidateInput["leadership"]>> = {}): NonNullable<DailyCandidateInput["leadership"]> => ({
+  boardCount: 1,
+  firstSealTime: "09:35:00",
+  lastSealTime: "09:35:00",
+  breakCount: 0,
+  sealAmount: 50_000_000,
+  dragonTiger: null,
+  industryLimitUps: 1,
+  tier: "none",
+  reasons: [],
+  ...overrides,
+});
+
+test("turns certified leadership facts into a bounded bonus on top of the six dimensions", () => {
+  const leader = base({ code: "600301", leadership: leadership({
+    boardCount: 4,
+    firstSealTime: "09:25:00",
+    tier: "market",
+    reasons: ["当日 4 连板，为全市场最高梯队（最高 4 板）"],
+    dragonTiger: { netAmount: 120_000_000, buyAmount: 200_000_000, sellAmount: 80_000_000, reasons: ["日涨幅偏离值达到7%"], listCount: 1 },
+  }) });
+  const peer = base({ code: "600302", leadership: null });
+  const plain = base({ code: "600303" });
+  const result = selected(leader, peer, plain);
+  const scoredLeader = result.scored.find((item) => item.code === "600301")!;
+  const scoredPeer = result.scored.find((item) => item.code === "600302")!;
+  assert.ok(scoredLeader.leadershipBonus > 0, "取证到的龙头事实必须产生加分");
+  assert.ok(scoredLeader.leadershipBonus <= 12);
+  assert.equal(scoredLeader.leadershipTier, "market");
+  assert.equal(scoredLeader.finalScore, Math.round(scoredLeader.baseScore + scoredLeader.leadershipBonus - scoredLeader.overheatPenalty));
+  assert.ok(scoredLeader.finalScore > scoredPeer.finalScore, "同样的基础分下，龙头加分决定排序");
+  assert.equal(scoredPeer.leadershipBonus, 0, "未取证不产生加分");
+  assert.equal(scoredPeer.leadershipTier, "none");
+  assert.deepEqual(result.leadershipDiagnostics.marketLeaders, ["600301"]);
+  assert.equal(result.leadershipDiagnostics.covered, true);
+  assert.equal(result.leadershipDiagnostics.limitUpCandidates, 1);
+});
+
+test("caps the leadership bonus and does not reward a broken seal", () => {
+  const reference = (code: string) => base({ code, leadership: leadership({ boardCount: 1, firstSealTime: "14:30:00", industryLimitUps: 1 }) });
+  const solid = base({ code: "600311", leadership: leadership({
+    boardCount: 5,
+    firstSealTime: "09:25:00",
+    breakCount: 0,
+    tier: "market",
+    industryLimitUps: 6,
+    dragonTiger: { netAmount: 50_000_000, buyAmount: 1, sellAmount: 1, reasons: [], listCount: 1 },
+  }) });
+  const broken = base({ code: "600312", leadership: leadership({
+    boardCount: 5,
+    firstSealTime: "09:25:00",
+    breakCount: 3,
+    tier: "market",
+    industryLimitUps: 6,
+    dragonTiger: { netAmount: 50_000_000, buyAmount: 1, sellAmount: 1, reasons: [], listCount: 1 },
+  }) });
+  // 低总分配置用于验证炸板扣分：加分尚未触顶时，炸板 3 次应恰好少 3 分。
+  const steady = base({ code: "600313", leadership: leadership({ boardCount: 2, firstSealTime: "10:00:00", tier: "industry", industryLimitUps: 2 }) });
+  const chipped = base({ code: "600314", leadership: leadership({ boardCount: 2, firstSealTime: "10:00:00", breakCount: 3, tier: "industry", industryLimitUps: 2 }) });
+  const result = selected(solid, broken, steady, chipped, reference("600315"));
+  const solidScore = result.scored.find((item) => item.code === "600311")!;
+  const steadyScore = result.scored.find((item) => item.code === "600313")!;
+  const chippedScore = result.scored.find((item) => item.code === "600314")!;
+  assert.equal(solidScore.leadershipBonus, 12, "加分上限为 12 分");
+  assert.ok(steadyScore.leadershipBonus >= 3, "低总分配置必须留出扣分空间");
+  assert.equal(chippedScore.leadershipBonus, steadyScore.leadershipBonus - 3, "炸板 3 次扣 3 分");
+});
+
+test("rejects malformed leadership snapshots instead of scoring them", () => {
+  const result = selectDailyCandidates([
+    base({ code: "600321", leadership: { ...leadership(), tier: "god" } as unknown as DailyCandidateInput["leadership"] }),
+    base({ code: "600322", leadership: { ...leadership(), breakCount: -1 } as unknown as DailyCandidateInput["leadership"] }),
+    base({ code: "600323", leadership: { ...leadership(), firstSealTime: "9:25" } as unknown as DailyCandidateInput["leadership"] }),
+  ]);
+  assert.equal(result.exclusionCounts.invalidInput, 3);
+  assert.equal(result.leadershipDiagnostics.covered, false);
+});
+
+test("keeps unverified leadership neutral for ranking and audit", () => {
+  const withNull = base({ code: "600331", leadership: null });
+  const withoutField = base({ code: "600332" });
+  const result = selected(withNull, withoutField);
+  const first = result.scored.find((item) => item.code === "600331")!;
+  const second = result.scored.find((item) => item.code === "600332")!;
+  assert.equal(first.leadershipBonus, 0);
+  assert.equal(first.finalScore, second.finalScore, "缺失与显式 null 必须完全等价");
+  assert.equal(result.leadershipDiagnostics.covered, false);
+});
+
+test("never lets a first board reach leader-level bonus", () => {
+  const firstBoard = base({ code: "600341", leadership: leadership({
+    boardCount: 1,
+    firstSealTime: "09:25:00",
+    tier: "none",
+    industryLimitUps: 9,
+    dragonTiger: { netAmount: 90_000_000, buyAmount: 1, sellAmount: 1, reasons: [], listCount: 1 },
+  }) });
+  const leaderBoard = base({ code: "600342", leadership: leadership({
+    boardCount: 3,
+    firstSealTime: "09:25:00",
+    tier: "market",
+    industryLimitUps: 9,
+    dragonTiger: { netAmount: 90_000_000, buyAmount: 1, sellAmount: 1, reasons: [], listCount: 1 },
+  }) });
+  const result = selected(firstBoard, leaderBoard, base({ code: "600343" }), base({ code: "600344" }));
+  const first = result.scored.find((item) => item.code === "600341")!;
+  const leader = result.scored.find((item) => item.code === "600342")!;
+  assert.ok(first.leadershipBonus <= 4, "首板拿不到高度分与封板分，上限只有行业合力与龙虎榜 4 分");
+  assert.ok(leader.leadershipBonus > first.leadershipBonus + 3, "连板龙头与首板必须在加分上明显拉开");
+
+  const twoBoard = base({ code: "600345", leadership: leadership({
+    boardCount: 2,
+    firstSealTime: "09:25:00",
+    tier: "none",
+    industryLimitUps: 9,
+    dragonTiger: { netAmount: 90_000_000, buyAmount: 1, sellAmount: 1, reasons: [], listCount: 1 },
+  }) });
+  const capped = selected(twoBoard, base({ code: "600346" }), base({ code: "600347" }), base({ code: "600348" })).scored.find((item) => item.code === "600345")!;
+  assert.ok(capped.leadershipBonus <= 5, "连板但不是龙头的涨停股加分封顶 5 分");
+  assert.ok(leader.leadershipBonus > capped.leadershipBonus, "龙头加分必须高于同日的普通连板");
 });

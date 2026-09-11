@@ -155,6 +155,45 @@ export interface DailyCandidateEvidence {
   url?: string;
 }
 
+/** 行业舆情角度的证据：行业级新闻（标题直接命中行业）或成分股新闻。 */
+export interface DailyCandidateIndustryNewsEvidence extends DailyCandidateEvidence {
+  title?: string;
+  tone?: string;
+  confidence?: number;
+  scope?: "industry" | "constituent";
+}
+
+/** 当日数据窗口内经公告核验的股东减持信号；命中即被排除出候选。 */
+export interface DailyCandidateShareReduction {
+  level: "major" | "minor";
+  title: string;
+  publishedAt: string;
+  sourceKind: string;
+  matched: string[];
+}
+
+/** 当日龙头事实（涨停池 + 龙虎榜，落库前已与本地同日行情逐条核对）。 */
+export interface DailyCandidateLeadership {
+  boardCount: number;
+  firstSealTime: string | null;
+  lastSealTime: string | null;
+  breakCount: number;
+  sealAmount: number | null;
+  industryLimitUps: number;
+  tier: "market" | "industry" | "none";
+  reasons: string[];
+  dragonTiger: null | {
+    netAmount: number | null;
+    buyAmount: number | null;
+    sellAmount: number | null;
+    reasons: string[];
+    listCount: number;
+  };
+  /** 冻结时写入的加分与标签，仅入选记录带有。 */
+  bonus?: number;
+  label?: string | null;
+}
+
 export interface DailyCandidateSnapshot {
   name?: string;
   open?: number;
@@ -171,7 +210,13 @@ export interface DailyCandidateSnapshot {
   discussionElapsedMinutes?: number;
   discussionGrowth?: { value?: number; mentionDelta?: number; isComparable?: boolean };
   discussionHistory?: Array<{ count: number; interactions: number; elapsedMinutes: number; verified: boolean }>;
-  industry?: { name?: string; textHeat?: number; relation?: string } | null;
+  industry?: { name?: string; textHeat?: number; textDirection?: number; marketStrength?: number; breadth?: number; relation?: string } | null;
+  /** 行业舆情角度的评分输入：行业新闻条数与方向分。 */
+  industryNews?: { count?: number; textDirection?: number } | null;
+  industryNewsEvidence?: DailyCandidateIndustryNewsEvidence[];
+  shareReduction?: DailyCandidateShareReduction | null;
+  /** 龙头事实；缺失表示该交易日尚未取证，不等同于「不是龙头」。 */
+  leadership?: DailyCandidateLeadership | null;
   events?: DailyCandidateEvidence[];
   [key: string]: unknown;
 }
@@ -276,6 +321,17 @@ export interface DailyCandidatePerformanceResponse {
 export type DailyFocusPoolTrendDirection = "strong-up" | "up" | "weakening" | "repairing" | "down" | "flat" | "insufficient";
 export type DailyFocusPoolWindowSessions = 2 | 3 | 4 | 5;
 
+export interface DailyFocusPoolLeadershipResponse {
+  isLeader: boolean;
+  tier: "market" | "industry" | null;
+  label: string | null;
+  maxBoardCount: number | null;
+  limitUpDates: string[];
+  dragonTigerDates: string[];
+  lastFirstSealTime: string | null;
+  reasons: string[];
+}
+
 export interface DailyFocusPoolItemResponse {
   code: string;
   name: string;
@@ -295,10 +351,28 @@ export interface DailyFocusPoolItemResponse {
   downDays: number;
   flatDays: number;
   trend: { direction: DailyFocusPoolTrendDirection; label: string; summary: string };
+  /** 窗口内龙头表现；涨停池/龙虎榜未取证的日期不参与，缺证据时为空。 */
+  leadership: DailyFocusPoolLeadershipResponse;
 }
 
 export interface DailyFocusPoolResponse {
-  window: { start: string | null; end: string | null; tradeDates: string[]; sessions: DailyFocusPoolWindowSessions; maxSessions: 5 };
+  window: {
+    start: string | null;
+    end: string | null;
+    tradeDates: string[];
+    sessions: DailyFocusPoolWindowSessions;
+    maxSessions: 5;
+    /** 最新已留存交易日。 */
+    latestTradeDate: string | null;
+    /** 可锚定的观察截止日（倒序，含最新）。 */
+    availableTradeDates: string[];
+    /** 当前窗口是否以最新交易日结束。 */
+    isLatest: boolean;
+    /** 实际贡献股票的聚焦名单日期：池子只来源于这些日期的每日聚焦结果。 */
+    listDates: string[];
+    /** 当前交易日实时预览名单的日期；历史窗口为 null。 */
+    livePreviewDate: string | null;
+  };
   asOf: string | null;
   items: DailyFocusPoolItemResponse[];
   stats: {
@@ -311,6 +385,8 @@ export interface DailyFocusPoolResponse {
     downRatio: number | null;
     hotIndustry: number;
     hotIndustryRatio: number | null;
+    leaders: number;
+    leaderRatio: number | null;
   };
 }
 
@@ -354,7 +430,7 @@ export const api = {
   },
   dailyCandidates: (date?: string, signal?: AbortSignal) => request<DailyCandidatesResponse>(`/api/daily-candidates${date ? `?date=${encodeURIComponent(date)}` : ""}`, { signal }),
   dailyCandidatePerformance: (window: 20 | 60 = 20, costBps = 0, signal?: AbortSignal) => request<DailyCandidatePerformanceResponse>(`/api/daily-candidates/performance?window=${window}&cost_bps=${encodeURIComponent(String(costBps))}`, { signal }),
-  dailyFocusPool: (sessions: DailyFocusPoolWindowSessions = 5, signal?: AbortSignal) => request<DailyFocusPoolResponse>(`/api/daily-focus-pool?sessions=${sessions}`, { signal }),
+  dailyFocusPool: (sessions: DailyFocusPoolWindowSessions = 5, date = "", signal?: AbortSignal) => request<DailyFocusPoolResponse>(`/api/daily-focus-pool?sessions=${sessions}${date ? `&date=${encodeURIComponent(date)}` : ""}`, { signal }),
   system: (signal?: AbortSignal) => request<SystemStatus>("/api/system", { signal }),
   refreshSystem: (signal?: AbortSignal) => request<SystemStatus>("/api/system/refresh", { method: "POST", signal }),
   sourceDiscussions: (source: DiscussionSourceId, page = 1, signal?: AbortSignal) => request<SourceDiscussionsResponse>(`/api/system/discussions?source=${encodeURIComponent(source)}&page=${page}`, { signal }),

@@ -114,6 +114,8 @@ test("builds a five-session pool with true consecutive streaks, price outcomes, 
     downRatio: 0.2,
     hotIndustry: 1,
     hotIndustryRatio: 0.2,
+    leaders: 0,
+    leaderRatio: 0,
   });
 
   const twoSessionPool = buildDailyFocusPool({ ...source, windowSessions: 2 });
@@ -122,4 +124,112 @@ test("builds a five-session pool with true consecutive streaks, price outcomes, 
   assert.deepEqual(twoSessionPool.items.map((item) => item.code).sort(), ["600001", "600002", "600004", "600005"]);
   assert.equal(twoSessionPool.items.every((item) => item.dailyChanges.length === 2), true);
   assert.equal(twoSessionPool.items.find((item) => item.code === "600001")?.windowPctChange, 4.8551);
+});
+
+test("anchors the window on any retained trading day and reports how to return to the latest", () => {
+  const quotesByDate = new Map(dates.map((tradeDate) => [tradeDate, [quote(tradeDate, "600001", 10, 1)]]));
+  const source = { tradeDates: dates, windowSessions: 3 as const, lists: [], quotesByDate };
+
+  const latest = buildDailyFocusPool(source);
+  assert.deepEqual(latest.window.tradeDates, dates.slice(-3));
+  assert.equal(latest.window.latestTradeDate, dates.at(-1));
+  assert.equal(latest.window.isLatest, true);
+  assert.deepEqual(latest.window.availableTradeDates, [...dates].reverse(), "日期下拉需要全部已留存交易日，倒序且最新在前");
+
+  const anchored = buildDailyFocusPool({ ...source, windowEndDate: "2026-08-27" });
+  assert.deepEqual(anchored.window.tradeDates, ["2026-08-25", "2026-08-26", "2026-08-27"], "点选 08-27 即以该日结束窗口");
+  assert.equal(anchored.window.end, "2026-08-27");
+  assert.equal(anchored.window.isLatest, false);
+  assert.equal(anchored.window.latestTradeDate, dates.at(-1), "历史窗口仍然告知最新交易日，便于回到最新");
+
+  const earliest = buildDailyFocusPool({ ...source, windowEndDate: dates[0] });
+  assert.deepEqual(earliest.window.tradeDates, [dates[0]!], "窗口不足 N 个交易日时只展示已存在的部分，不补造日期");
+  assert.equal(earliest.window.start, dates[0]);
+
+  const unknown = buildDailyFocusPool({ ...source, windowEndDate: "2026-01-01" });
+  assert.deepEqual(unknown.window.tradeDates, dates.slice(-3), "未知日期回落到最新窗口，而不是给出空窗口");
+  assert.equal(unknown.window.isLatest, true);
+});
+
+test("marks pool members that were the market or industry leader on a certified trading day", () => {
+  const windowDates = dates.slice(-3);
+  const quotesByDate = new Map(windowDates.map((tradeDate) => [tradeDate, [
+    quote(tradeDate, "600001", 10, 1, "半导体"),
+    quote(tradeDate, "600002", 10, 1, "半导体"),
+    quote(tradeDate, "600003", 10, 1, "制造业"),
+  ]]));
+  const lists = windowDates.map((tradeDate) => ({ tradeDate, items: [entry("600001"), entry("600002"), entry("600003")] }));
+  const leadershipRow = (tradeDate: string, code: string, boardCount: number, firstSealTime: string | null, industryName: string) => ({
+    code,
+    name: `股票${code}`,
+    tradeDate,
+    industryName,
+    boardCount,
+    firstSealTime,
+    lastSealTime: firstSealTime,
+    breakCount: 0,
+    sealAmount: null,
+    amount: 200_000_000,
+    dragonTiger: null,
+  });
+  const leadershipByDate = new Map([
+    // 08-27：600001 为全市场最高 3 板，600002 在半导体行业内涨停但落后，600003 首板。
+    ["2026-08-27", [leadershipRow("2026-08-27", "600001", 3, "09:31:00", "半导体"), leadershipRow("2026-08-27", "600002", 2, "10:05:00", "半导体"), leadershipRow("2026-08-27", "600003", 1, "13:40:00", "制造业")]],
+    // 08-28：600002 反超成为 4 板市场龙头。
+    ["2026-08-28", [leadershipRow("2026-08-28", "600002", 4, "09:25:00", "半导体"), leadershipRow("2026-08-28", "600001", 1, "14:20:00", "半导体")]],
+  ]);
+  const pool = buildDailyFocusPool({ tradeDates: dates, windowSessions: 3, lists, quotesByDate, leadershipByDate });
+
+  const first = pool.items.find((item) => item.code === "600001")!;
+  assert.equal(first.leadership.isLeader, true);
+  assert.equal(first.leadership.tier, "market");
+  assert.equal(first.leadership.maxBoardCount, 3);
+  assert.deepEqual(first.leadership.limitUpDates, ["2026-08-27", "2026-08-28"]);
+  assert.match(first.leadership.reasons.join(" "), /全市场最高梯队/);
+
+  const second = pool.items.find((item) => item.code === "600002")!;
+  assert.equal(second.leadership.isLeader, true);
+  assert.equal(second.leadership.tier, "market", "market leadership on any window day outranks industry-only days");
+  assert.equal(second.leadership.maxBoardCount, 4);
+  assert.equal(second.leadership.lastFirstSealTime, "09:25:00", "最近一个涨停日的首次封板时间");
+
+  const third = pool.items.find((item) => item.code === "600003")!;
+  assert.equal(third.leadership.tier, null);
+  assert.equal(third.leadership.label, "1 连板");
+  assert.deepEqual(third.leadership.reasons, ["窗口内最高 1 连板"]);
+
+  assert.equal(pool.stats.leaders, 2);
+  assert.equal(pool.stats.leaderRatio, 0.6667);
+  assert.deepEqual(pool.items.slice(0, 2).map((item) => item.code).sort(), ["600001", "600002"], "龙头排在列表最前");
+  assert.equal(pool.window.listDates.length, 3, "池子只由窗口内有聚焦名单的日期构成");
+});
+
+test("leaves leadership unverified when a window day has no certified limit-up data", () => {
+  const quotesByDate = new Map(dates.slice(-2).map((tradeDate) => [tradeDate, [quote(tradeDate, "600001", 10, 1)]]));
+  const lists = dates.slice(-2).map((tradeDate) => ({ tradeDate, items: [entry("600001")] }));
+  const pool = buildDailyFocusPool({ tradeDates: dates, windowSessions: 2, lists, quotesByDate });
+  const item = pool.items[0]!;
+  assert.equal(item.leadership.isLeader, false);
+  assert.equal(item.leadership.tier, null);
+  assert.equal(item.leadership.maxBoardCount, null);
+  assert.deepEqual(item.leadership.reasons, []);
+  assert.equal(pool.window.listDates.length, 2);
+  assert.equal(pool.window.livePreviewDate, null);
+});
+
+test("keeps the latest trading day aware when the service only passes the anchored window", () => {
+  const quotesByDate = new Map(dates.map((tradeDate) => [tradeDate, [quote(tradeDate, "600001", 10, 1)]]));
+  const windowDates = ["2026-08-26", "2026-08-27", "2026-08-28"];
+  const pool = buildDailyFocusPool({
+    tradeDates: windowDates,
+    windowSessions: 3,
+    windowEndDate: "2026-08-28",
+    latestTradeDate: dates.at(-1),
+    availableTradeDates: [...dates].reverse(),
+    lists: [],
+    quotesByDate,
+  });
+  assert.deepEqual(pool.window.tradeDates, windowDates);
+  assert.equal(pool.window.latestTradeDate, "2026-08-31");
+  assert.equal(pool.window.isLatest, false, "只传窗口内行情时，历史窗口不能被误判成最新窗口");
 });

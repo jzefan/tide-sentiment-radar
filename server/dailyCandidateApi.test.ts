@@ -8,6 +8,7 @@ import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 
 type Database = typeof import("./database.ts");
+const { DAILY_FOCUS_VERSION } = await import("./dailyCandidateStrategy.ts");
 
 const entry = (code: string, rank: number) => ({ code, rank, grade: "A" as const, isHotIndustry: true, baseScore: 80, overheatPenalty: 0, finalScore: 80, scores: {}, snapshot: {}, reasons: [] });
 const list = (tradeDate: string, origin: "prospective" | "reconstructed") => ({
@@ -117,7 +118,7 @@ test("daily-candidate HTTP routes validate parameters, expose reconstructed reco
     assert.equal(previewResponse.status, 200);
     const preview = await previewResponse.json();
     assert.equal(preview.status, "preview", "current route builds a non-persisted preview instead of returning 404");
-    assert.equal(preview.methodologyVersion, "daily-focus-v3", "new previews expose the market-first one-to-ten selection methodology");
+    assert.equal(preview.methodologyVersion, DAILY_FOCUS_VERSION, "new previews expose the market-first one-to-ten selection methodology");
     assert.deepEqual(preview.outcomes, []);
     const explicitCurrent = await get("/api/daily-candidates?date=2026-08-25");
     assert.equal(explicitCurrent.status, 200, "explicitly selecting the current trading day returns its preview instead of a historical-list 404");
