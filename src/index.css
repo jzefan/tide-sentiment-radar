@@ -282,6 +282,8 @@
   .focus-pool-stock em { flex: none; border: 1px solid color-mix(in oklch, var(--warning), transparent 55%); padding: .08rem .28rem; color: var(--warning); font-size: .5625rem; font-style: normal; font-weight: 650; }
   .focus-pool-stock em.focus-pool-leader { border-color: color-mix(in oklch, var(--up), transparent 40%); background: color-mix(in oklch, var(--up), transparent 88%); color: var(--up); }
   .focus-pool-stock em.focus-pool-leader.is-market { border-color: var(--up); background: color-mix(in oklch, var(--up), transparent 78%); }
+  .focus-pool-stock em.focus-pool-focus { border-color: color-mix(in oklch, var(--foreground), transparent 62%); color: var(--muted-foreground); }
+  .focus-pool-stock em.focus-pool-focus.is-hot { border-color: color-mix(in oklch, var(--down), transparent 45%); color: var(--down); }
   .focus-pool-stock small { display: block; overflow: hidden; margin-top: .18rem; color: var(--muted-foreground); font-size: .6rem; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
   .focus-pool-stock:hover strong { color: var(--up); }
   .focus-pool-industries { display: flex; min-width: 0; flex-wrap: wrap; gap: .28rem; }
@@ -342,8 +344,10 @@
   .daily-focus-notice, .daily-focus-empty { display: flex; align-items: flex-start; gap: 0.7rem; border: 1px solid var(--border); padding: 1rem; font-size: 0.8125rem; }
   .daily-focus-notice p, .daily-focus-empty p { margin-top: 0.2rem; color: var(--muted-foreground); font-size: 0.75rem; line-height: 1.4; }
   .daily-focus-notice button { margin-left: auto; }
+  .daily-focus-mode-note { display: flex; align-items: center; gap: .5rem; border: 1px dashed color-mix(in oklch, var(--warning), transparent 45%); background: color-mix(in oklch, var(--warning-soft), transparent 55%); padding: .5rem .7rem; color: var(--muted-foreground); font-size: .6875rem; line-height: 1.45; }
+  .daily-focus-mode-note svg { flex: none; color: var(--warning); }
   .daily-focus-loading { padding: 4rem 0; }
-  .daily-focus-audit { display: grid; grid-template-columns: minmax(15rem, 1.7fr) repeat(4, minmax(8rem, 1fr)); border-block: 1px solid var(--border); }
+  .daily-focus-audit { display: grid; grid-template-columns: minmax(15rem, 1.7fr) repeat(5, minmax(7rem, 1fr)); border-block: 1px solid var(--border); }
   .daily-focus-status, .daily-focus-audit-metric { min-width: 0; padding: 0.9rem 1rem; border-right: 1px solid var(--border); }
   .daily-focus-status { display: flex; align-items: center; gap: 0.65rem; }
   .daily-focus-status strong { display: block; font-size: 0.875rem; }

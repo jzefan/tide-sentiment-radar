@@ -6,7 +6,7 @@ import test from "node:test";
 import { DatabaseSync } from "node:sqlite";
 
 type Database = typeof import("./database.ts");
-const { DAILY_FOCUS_VERSION } = await import("./dailyCandidateStrategy.ts");
+const { DAILY_FOCUS_VERSION } = await import("./dailyCandidateStrategyV7.ts");
 
 const at = (value: string) => new Date(value);
 const cutoff = "2026-08-25T07:00:00.000Z"; // 15:00 Asia/Shanghai
@@ -596,21 +596,19 @@ test("wires certified limit-up and dragon-tiger facts into candidate scoring, re
     const leader = withLeadership.items.find((item: any) => item.code === "600001")!;
     assert.equal(leader.snapshot.leadership.tier, "market");
     assert.equal(leader.snapshot.leadership.label, "4 连板 · 市场龙头");
-    assert.ok(leader.snapshot.leadership.bonus > 0, "龙头加分随快照留档");
+    assert.equal(leader.snapshot.leadership.bonus, 3, "V7 龙头加分收敛为层级分：市场龙头 3 分");
     assert.equal(leader.snapshot.leadership.industryLimitUps, 3, "行业涨停家数按候选集合统计");
     assert.ok((leader.reasons as string[]).some((reason) => reason.includes("龙头：4 连板 · 市场龙头")), "入选理由必须写出龙头判定");
 
     const industry = withLeadership.items.find((item: any) => item.code === "600002")!;
     assert.equal(industry.snapshot.leadership.tier, "industry");
     assert.equal(industry.snapshot.leadership.label, "2 连板 · 行业龙头");
+    assert.equal(industry.snapshot.leadership.bonus, 2, "行业龙头 2 分");
 
     const first = withLeadership.items.find((item: any) => item.code === "600003")!;
     assert.equal(first.snapshot.leadership.tier, "none");
     assert.equal(first.snapshot.leadership.label, "1 连板");
-    assert.ok(
-      first.snapshot.leadership.bonus > 0 && first.snapshot.leadership.bonus < leader.snapshot.leadership.bonus,
-      "首板只按行业涨停家数拿板块合力分，永远不会达到龙头的高度分",
-    );
+    assert.equal(first.snapshot.leadership.bonus, 0, "V7 不再给首板板块合力加分，龙头加分只按层级");
 
     const plain = withoutLeadership.items.find((item: any) => item.code === "600001")!;
     assert.equal(plain.snapshot.leadership, null, "未取证时快照保持 null 而不是伪造");

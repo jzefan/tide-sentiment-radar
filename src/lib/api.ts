@@ -217,6 +217,30 @@ export interface DailyCandidateSnapshot {
   shareReduction?: DailyCandidateShareReduction | null;
   /** 龙头事实；缺失表示该交易日尚未取证，不等同于「不是龙头」。 */
   leadership?: DailyCandidateLeadership | null;
+  /** V7：每日聚焦以未来约两周研究价值为主、当前热度为辅。旧冻结记录没有这些字段。 */
+  methodologyVersion?: string;
+  focusType?: "research" | "hot" | "research-hot";
+  lane?: "event" | "trend" | "dual" | null;
+  researchScore2W?: number;
+  hotScore?: number;
+  eventScore?: number;
+  trendScore?: number;
+  catalystPersistence?: number;
+  eventNovelty?: number;
+  sentimentDelta?: number | null;
+  attentionAcceleration?: number | null;
+  repeatPenalty?: number;
+  continuationBonus?: number;
+  primaryEventClusterId?: string | null;
+  primaryEvent?: null | {
+    clusterId?: string;
+    title?: string;
+    importance?: number;
+    novelty?: number;
+    persistence?: number;
+  };
+  /** 与上一次聚焦时的核心事件相比是否换过理由。 */
+  focusReasonChanged?: boolean;
   events?: DailyCandidateEvidence[];
   [key: string]: unknown;
 }
@@ -351,6 +375,19 @@ export interface DailyFocusPoolItemResponse {
   downDays: number;
   flatDays: number;
   trend: { direction: DailyFocusPoolTrendDirection; label: string; summary: string };
+  /** 逐日聚焦理由：通道 / 产品类型 / 核心事件（旧冻结记录为 null）。 */
+  focus: {
+    lane: "event" | "trend" | "dual" | null;
+    focusType: "research" | "hot" | "research-hot" | null;
+    primaryEventTitle: string | null;
+    changed: boolean;
+    timeline: Array<{
+      tradeDate: string;
+      lane: "event" | "trend" | "dual" | null;
+      focusType: "research" | "hot" | "research-hot" | null;
+      primaryEventTitle: string | null;
+    }>;
+  };
   /** 窗口内龙头表现；涨停池/龙虎榜未取证的日期不参与，缺证据时为空。 */
   leadership: DailyFocusPoolLeadershipResponse;
 }

@@ -16,7 +16,8 @@ import {
   type DailyCandidateOutcome,
 } from "./database.ts";
 import { buildIndustryAnalytics, classifyStockIndustry, type IndustryPulse } from "./industryAnalytics.ts";
-import { DAILY_FOCUS_VERSION, selectDailyCandidates, type DailyCandidateInput, type DailyCandidateScored, type DiscussionWindow } from "./dailyCandidateStrategy.ts";
+import { DAILY_FOCUS_VERSION, selectDailyCandidates, type DailyCandidateInput, type DailyCandidateScored, type DiscussionWindow } from "./dailyCandidateStrategyV7.ts";
+import { buildEventClusters, scoreEventNovelty, type EventCluster, type HistoricalEventEvidence } from "./eventCluster.ts";
 import { classifyShareReductionText } from "./shareReduction.ts";
 import { deriveDailyLeaders, leadershipLabel, type LeadershipDayRow } from "./leadership.ts";
 import { isTradingDate, verifiedTradingDaysSinceListing } from "../src/domain/marketCalendar.ts";
@@ -397,6 +398,66 @@ function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tra
     return relatedStocks.length ? [{ ...event, relatedStocks }] : [];
   });
   const events = dedupeCandidateEvents(authorizedEvents);
+  // 传入交易日：事件重要度的「时效」项按该日 15:00 计算，保证脱机重建也确定。
+  const currentClusters = buildEventClusters(events, source.tradeDate);
+  const clustersByCode = new Map<string, EventCluster[]>();
+  for (const cluster of currentClusters) {
+    for (const code of cluster.stockCodes) {
+      clustersByCode.set(code, [...(clustersByCode.get(code) ?? []), cluster]);
+    }
+  }
+  const priorLists = listDailyCandidateLists()
+    .filter((list) => list.tradeDate < source.tradeDate && list.items.length > 0)
+    .sort((left, right) => right.tradeDate.localeCompare(left.tradeDate))
+    .slice(0, 10);
+  const historyByCode = new Map<string, {
+    focusDates: string[];
+    textDirections: number[];
+    eventCounts: number[];
+    events: HistoricalEventEvidence[];
+  }>();
+  const sourceKindOf = (value: unknown): HistoricalEventEvidence["sourceKind"] =>
+    value === "announcement" || value === "news" || value === "forum" || value === "market"
+      ? value
+      : null;
+  for (const list of priorLists) {
+    for (const item of list.items) {
+      const snapshot = item.snapshot && typeof item.snapshot === "object" && !Array.isArray(item.snapshot)
+        ? item.snapshot as Record<string, unknown>
+        : {};
+      const history = historyByCode.get(item.code) ?? {
+        focusDates: [],
+        textDirections: [],
+        eventCounts: [],
+        events: [],
+      };
+      history.focusDates.push(list.tradeDate);
+      if (typeof snapshot.textDirection === "number" && Number.isFinite(snapshot.textDirection)) {
+        history.textDirections.push(snapshot.textDirection);
+      }
+      const previousEvents = Array.isArray(snapshot.events) ? snapshot.events : [];
+      history.eventCounts.push(previousEvents.length);
+      for (const value of previousEvents) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const event = value as Record<string, unknown>;
+        if (typeof event.title !== "string" || typeof event.publishedAt !== "string") continue;
+        history.events.push({
+          title: event.title,
+          publishedAt: event.publishedAt,
+          sourceKind: sourceKindOf(event.sourceKind),
+        });
+      }
+      historyByCode.set(item.code, history);
+    }
+  }
+  const medianValue = (values: number[]): number | null => {
+    const ordered = [...values].filter(Number.isFinite).sort((left, right) => left - right);
+    if (!ordered.length) return null;
+    const middle = Math.floor(ordered.length / 2);
+    return ordered.length % 2
+      ? ordered[middle]!
+      : (ordered[middle - 1]! + ordered[middle]!) / 2;
+  };
   const codes = [...new Set(source.quotes.map((quote) => quote.code))];
   const amounts = getRecentAmounts(codes, 5, source.tradeDate);
   const returns = getRecentPctChanges(codes, 3, source.tradeDate);
@@ -472,6 +533,36 @@ function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tra
       : null;
     if (industryNewsAngle) industryNews.set(quote.code, industryNewsAngle);
     const sourceCount = new Set(relevant.map((event) => event.source)).size;
+    const history = historyByCode.get(quote.code);
+    const historicalTextDirectionMedian = medianValue(history?.textDirections ?? []);
+    const currentEventClusters = (clustersByCode.get(quote.code) ?? []).map((cluster) => ({
+      clusterId: cluster.id,
+      title: cluster.primaryTitle,
+      category: cluster.category,
+      importance: cluster.importance,
+      persistence: cluster.persistence,
+      novelty: scoreEventNovelty(cluster, history?.events ?? [], source.tradeDate),
+      direction: cluster.direction,
+      confidence: cluster.confidence,
+      evidenceCount: cluster.evidenceCount,
+      independentSourceCount: cluster.independentSourceCount,
+      authorityCount: cluster.authorityCount,
+    }));
+    const focusDaysLast5 = priorLists.slice(0, 5)
+      .filter((list) => list.items.some((item) => item.code === quote.code))
+      .length;
+    let consecutiveFocusDays = 0;
+    for (const list of priorLists.slice(0, 5)) {
+      if (!list.items.some((item) => item.code === quote.code)) break;
+      consecutiveFocusDays += 1;
+    }
+    const lastFocusDate = history?.focusDates[0] ?? null;
+    const lastPrimaryEventClusterId = priorLists
+      .flatMap((list) => list.items.filter((item) => item.code === quote.code))
+      .map((item) => item.snapshot && typeof item.snapshot === "object" && !Array.isArray(item.snapshot)
+        ? (item.snapshot as Record<string, unknown>).primaryEventClusterId
+        : null)
+      .find((value): value is string => typeof value === "string" && value.length > 0) ?? null;
     return [{
       code: quote.code, name: quote.name, exchange: quote.exchange, listingTradingDays: tradingDaysSince(quote.listingDate, source.tradeDate), tradeDate: source.tradeDate,
       open, high, low, close: price, previousClose, pctChange: quote.pctChange, amount: quote.amount,
@@ -488,6 +579,14 @@ function buildInputs(source: DailyCandidateSource, cutoff = cutoffFor(source.tra
       leadership: leadershipInput(quote.code),
       isSuspended: quote.amount <= 0, onePriceLimit: limitState.onePriceLimit || observableOnePriceLimit, reopenedLimit: limitState.reopenedLimit,
       threeDayReturn: (returns.get(quote.code) ?? []).reduce((sum, item) => sum + item.pctChange, 0),
+      eventClusters: currentEventClusters,
+      historicalTextDirectionMedian,
+      sentimentDelta: historicalTextDirectionMedian === null ? null : (stock.textDirectionScore ?? 50) - historicalTextDirectionMedian,
+      historicalEventCountMedian: medianValue(history?.eventCounts ?? []),
+      focusDaysLast5,
+      consecutiveFocusDays,
+      lastFocusDate,
+      lastPrimaryEventClusterId,
     }];
   });
   // 行业涨停家数按候选集合内的涨停股统计，用于「板块合力」这一子项。
@@ -563,14 +662,31 @@ function entry(item: DailyCandidateScored, evidence: SentimentEvent[], industryN
       ...item.inputAudit, industry: item.industry, discussionGrowth: item.discussionGrowth,
       // 板块只由代码前缀决定，落档后界面不用重复实现一套分类。
       board: item.board,
+      methodologyVersion: DAILY_FOCUS_VERSION,
+      focusType: item.focusType,
+      lane: item.lane,
+      researchScore2W: item.researchScore2W,
+      hotScore: item.hotScore,
+      eventScore: item.eventScore,
+      trendScore: item.trendScore,
+      catalystPersistence: item.catalystPersistence,
+      eventNovelty: item.eventNovelty,
+      sentimentDelta: item.sentimentDelta,
+      attentionAcceleration: item.attentionAcceleration,
+      repeatPenalty: item.repeatPenalty,
+      continuationBonus: item.continuationBonus,
+      primaryEventClusterId: item.primaryEvent?.clusterId ?? null,
+      primaryEvent: item.primaryEvent,
+      focusReasonChanged: item.focusReasonChanged,
       leadership: leadership ? { ...leadership, bonus: item.leadershipBonus, label: leadershipText } : null,
       events: evidence.map((event) => ({ id: event.id, title: event.title, source: event.source, sourceKind: event.sourceKind, tone: event.tone, confidence: event.confidence, heat: event.heat, publishedAt: event.publishedAt, ...(event.url ? { url: event.url } : {}) })),
       industryNewsEvidence: industryNews?.evidence ?? [],
     },
     reasons: [
-      "成交额趋势确认",
-      "当日上涨且跑赢市场",
-      evidence.length ? "文本或讨论提供加分" : "文本与讨论缺失，按市场信号入选",
+      item.focusType === "research-hot" ? "研究价值与当前热度双高" : item.focusType === "research" ? "未来约两周仍值得持续研究" : "当前市场热点观察",
+      item.lane === "dual" ? "新事件与趋势双确认" : item.lane === "event" ? "新事件/新催化驱动" : item.lane === "trend" ? "量价趋势持续确认" : "热点信号入选",
+      item.primaryEvent ? `核心事件：${item.primaryEvent.title}` : evidence.length ? "存在可核验文本或讨论证据" : "无事件型证据，主要由市场热度与趋势构成",
+      `研究分 ${item.researchScore2W.toFixed(1)} · 热度分 ${item.hotScore.toFixed(1)}`,
       item.board ? `板块：${item.board}` : "板块未识别（未知代码前缀）",
       item.industry ? `行业：${item.industry.name}${industryNewsReason ? ` · ${industryNewsReason}` : ""}` : "行业数据缺失",
       // 龙头是外部可核验事实（涨停池 + 龙虎榜），单独列出判定依据，便于逐条复核。

@@ -8,7 +8,7 @@ import type { AddressInfo } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 
 type Database = typeof import("./database.ts");
-const { DAILY_FOCUS_VERSION } = await import("./dailyCandidateStrategy.ts");
+const { DAILY_FOCUS_VERSION } = await import("./dailyCandidateStrategyV7.ts");
 
 const entry = (code: string, rank: number) => ({ code, rank, grade: "A" as const, isHotIndustry: true, baseScore: 80, overheatPenalty: 0, finalScore: 80, scores: {}, snapshot: {}, reasons: [] });
 const list = (tradeDate: string, origin: "prospective" | "reconstructed") => ({

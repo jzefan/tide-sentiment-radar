@@ -50,7 +50,14 @@ import {
   dailyFocusCandidateStrength,
   dailyFocusBoardLabel,
   dailyFocusBoardMixText,
+  dailyFocusDataMode,
+  dailyFocusDataModeLabel,
+  dailyFocusDataModeNotice,
   dailyFocusDateOptions,
+  dailyFocusFocusTypeLabel,
+  dailyFocusLaneLabel,
+  dailyFocusLaneNotice,
+  dailyFocusV7ScoreRows,
   dailyFocusExclusionLabel,
   dailyFocusIndustryLabel,
   dailyFocusLeadership,
@@ -1432,6 +1439,21 @@ function DailyFocusPoolRow({ item }: { item: DailyFocusPoolItemResponse }) {
               {item.leadership.tier === "market" ? "市场龙头" : "行业龙头"}
             </em>
           ) : null}
+          {item.focus.focusType ? (
+            <em
+              className={cn(
+                "focus-pool-focus",
+                item.focus.focusType === "hot" && "is-hot",
+              )}
+              title={
+                item.focus.primaryEventTitle
+                  ? `最近聚焦：${dailyFocusFocusTypeLabel(item.focus.focusType)} · ${item.focus.primaryEventTitle}`
+                  : `最近聚焦：${dailyFocusFocusTypeLabel(item.focus.focusType)}`
+              }
+            >
+              {dailyFocusFocusTypeLabel(item.focus.focusType)}
+            </em>
+          ) : null}
           {item.isHotIndustry ? <em>热门</em> : null}
         </span>
         <small>
@@ -1440,6 +1462,20 @@ function DailyFocusPoolRow({ item }: { item: DailyFocusPoolItemResponse }) {
         <small title={item.focusDates.join(" / ")}>
           聚焦 {item.focusDates.map((date) => date.slice(5)).join(" / ")}
         </small>
+        {item.focus.timeline.some((point) => point.lane || point.focusType) ? (
+          <small title={item.focus.primaryEventTitle ?? ""}>
+            {item.focus.timeline
+              .map((point) => {
+                const label =
+                  dailyFocusLaneLabel(point.lane) ??
+                  dailyFocusFocusTypeLabel(point.focusType);
+                return label ? `${point.tradeDate.slice(5)} ${label}` : null;
+              })
+              .filter(Boolean)
+              .join(" → ")}
+            {item.focus.changed ? " · 理由有变化" : ""}
+          </small>
+        ) : null}
       </Link>
       <div className="focus-pool-industries">
         {item.industries.length ? (
@@ -2336,6 +2372,14 @@ function DailyFocusPanel({
   const status = payload
     ? dailyFocusStatus(payload.status, payload.origin)
     : null;
+  // 证据模式与实测通道构成：文本证据不足时必须明说榜单由什么构成（设计 §33）。
+  const dataMode = payload ? dailyFocusDataMode(payload.dataQuality) : null;
+  const dataModeNotice = dataMode ? dailyFocusDataModeNotice(dataMode) : null;
+  const laneNotice = payload
+    ? dailyFocusLaneNotice(
+        payload.items.slice(0, 8).map((item) => asRecord(item.snapshot).lane),
+      )
+    : null;
   const historyHydrating = payload?.dataQuality.history === "hydrating";
   const selectedDate = date || payload?.tradeDate || "";
 
@@ -2481,8 +2525,21 @@ function DailyFocusPanel({
               label="数据质量"
               value={dataQualitySummary(payload.dataQuality)}
             />
+            {dataMode ? (
+              <AuditMetric
+                label="证据模式"
+                value={dailyFocusDataModeLabel(dataMode)}
+              />
+            ) : null}
           </section>
           <QualityDisclosure quality={payload.dataQuality} />
+
+          {dataModeNotice || laneNotice ? (
+            <section className="daily-focus-mode-note" role="status">
+              <Info size={15} />
+              <p>{[dataModeNotice, laneNotice].filter(Boolean).join(" ")}</p>
+            </section>
+          ) : null}
 
           {payload.items.length === 0 &&
           (payload.liveFocusItems?.length ?? 0) > 0 ? (
@@ -2529,11 +2586,11 @@ function DailyFocusPanel({
                   </h2>
                 </div>
                 <p>
-                  次日判断来自本日冻结信号；进入下一交易日后用实际涨跌幅持续验证。
-                  板块按推荐比例 主板:中小板:创业板:科创板 = 3:3:2:2 平衡，某板块没有合格候选时名额让给其他板块，尽量凑满 10 只。
+                  V7 以未来约两周仍值得持续研究的新变化为主，并保留少量当前最热股票。
+                  研究价值权重 80%，当前热度权重 20%；不再按板块配额凑满固定数量。
                 </p>
                 <p className="daily-focus-board-mix">
-                  本次入选板块：{dailyFocusBoardMixText(payload.items.slice(0, 10).map((item) => item.code))}
+                  本次入选板块：{dailyFocusBoardMixText(payload.items.slice(0, 8).map((item) => item.code))}
                 </p>
               </div>
               <div className="daily-focus-columns" aria-hidden="true">
@@ -2545,7 +2602,7 @@ function DailyFocusPanel({
                 <span />
               </div>
               <div className="divide-y">
-                {payload.items.slice(0, 10).map((item) => (
+                {payload.items.slice(0, 8).map((item) => (
                   <DailyFocusCandidate
                     key={item.code}
                     item={item}
@@ -2799,6 +2856,14 @@ function DailyFocusCandidate({
 }) {
   const [expanded, setExpanded] = useState(false);
   const snapshot = asRecord(item.snapshot);
+  const focusType = asString(snapshot.focusType);
+  const lane = asString(snapshot.lane);
+  const researchScore2W = asNumber(snapshot.researchScore2W);
+  const hotScore = asNumber(snapshot.hotScore);
+  const repeatPenalty = asNumber(snapshot.repeatPenalty);
+  const continuationBonus = asNumber(snapshot.continuationBonus);
+  const primaryEvent = asRecord(snapshot.primaryEvent);
+  const v7ScoreRows = dailyFocusV7ScoreRows(snapshot);
   const name = asString(snapshot.name) ?? item.code;
   const amount = asNumber(snapshot.amount);
   const pctChange = asNumber(snapshot.pctChange);
@@ -2875,6 +2940,13 @@ function DailyFocusCandidate({
               {dailyFocusBoardLabel(item.code) ?? "板块未识别"} ·{" "}
               {dailyFocusIndustryLabel(industryName, item.isHotIndustry)}
             </small>
+            {focusType ? (
+              <small>
+                {dailyFocusFocusTypeLabel(focusType) ?? focusType}
+                {dailyFocusLaneLabel(lane) ? ` · ${dailyFocusLaneLabel(lane)}` : ""}
+                {snapshot.focusReasonChanged === true ? " · 理由有变化" : ""}
+              </small>
+            ) : null}
             <small>
               {item.reasons.slice(0, 3).join(" · ") || "筛选理由未留存"}
             </small>
@@ -2892,7 +2964,11 @@ function DailyFocusCandidate({
         </span>
         <strong className="daily-focus-score">
           {item.finalScore.toFixed(1)}
-          <small>{dailyFocusScoreBreakdown(item)}</small>
+          <small>
+            {researchScore2W !== null && hotScore !== null
+              ? `研究 ${researchScore2W.toFixed(1)} · 热度 ${hotScore.toFixed(1)}`
+              : dailyFocusScoreBreakdown(item)}
+          </small>
         </strong>
         <span className="daily-focus-signal">
           <b>{textDirection ?? "—"}</b>
@@ -2973,19 +3049,55 @@ function DailyFocusCandidate({
             </p>
           </section>
           <section>
-            <p className="daily-focus-kicker">六维分项 / 过热</p>
-            <dl className="daily-focus-score-grid">
-              {scoreRows(item.scores).map(([label, score]) => (
-                <div key={label}>
-                  <dt>{label}</dt>
-                  <dd>{score.toFixed(1)}</dd>
-                </div>
-              ))}
-            </dl>
-            <p className="mt-2 text-xs text-muted-foreground">
-              原始 {item.baseScore.toFixed(1)} − 过热扣分{" "}
-              {item.overheatPenalty.toFixed(1)} = {item.finalScore.toFixed(1)}
+            <p className="daily-focus-kicker">
+              {v7ScoreRows ? "V7 双目标评分 / 风险调整" : "六维分项 / 风险调整"}
             </p>
+            {v7ScoreRows ? (
+              <dl className="daily-focus-score-grid">
+                {v7ScoreRows.map((row) => (
+                  <div key={row.label} title={row.detail}>
+                    <dt>{row.label}</dt>
+                    <dd>{row.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            ) : (
+              <dl className="daily-focus-score-grid">
+                {scoreRows(item.scores).map(([label, score]) => (
+                  <div key={label}>
+                    <dt>{label}</dt>
+                    <dd>{score.toFixed(1)}</dd>
+                  </div>
+                ))}
+              </dl>
+            )}
+            <p className="mt-2 text-xs text-muted-foreground">
+              {v7ScoreRows
+                ? v7ScoreRows
+                    .map((row) => `${row.label} ${row.value}`)
+                    .join(" · ")
+                : `旧版基础分 ${item.baseScore.toFixed(1)}`}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              {researchScore2W !== null && hotScore !== null
+                ? `研究 ${researchScore2W.toFixed(1)} × 80% + 热度 ${hotScore.toFixed(1)} × 20%`
+                : `基础 ${item.baseScore.toFixed(1)}`}
+              {" · "}
+              持续确认 +{(continuationBonus ?? 0).toFixed(1)}
+              {" · "}
+              重复扣分 −{(repeatPenalty ?? 0).toFixed(1)}
+              {" · "}
+              过热扣分 −{item.overheatPenalty.toFixed(1)}
+              {" = "}
+              {item.finalScore.toFixed(1)}
+            </p>
+            {asString(primaryEvent.title) ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {lane === "event" || lane === "dual"
+                  ? `核心事件（重要度 ${asNumber(primaryEvent.importance) ?? "—"} · 新鲜度 ${asNumber(primaryEvent.novelty) ?? "—"}）：${asString(primaryEvent.title)}`
+                  : `当日公告未达事件门槛（重要度 ${asNumber(primaryEvent.importance) ?? "—"}），仅作证据保留：${asString(primaryEvent.title)}`}
+              </p>
+            ) : null}
             {industryName && industryNewsSignal !== undefined && (
               <p className="mt-1 text-xs text-muted-foreground">
                 行业共振 {(item.scores.industry ?? 0).toFixed(1)} / 12：其中行业新闻确认{" "}

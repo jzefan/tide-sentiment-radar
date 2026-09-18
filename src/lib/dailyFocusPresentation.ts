@@ -5,8 +5,8 @@ export type DailyFocusStatusTone = "up" | "down" | "warning" | "neutral";
 export const DAILY_FOCUS_REFRESH_MS = 60_000;
 
 /** Convert internal strategy grades into plain-language labels for the page. */
-export function dailyFocusCandidateStrength(grade: "A" | "B"): "强信号" | "达标信号" {
-  return grade === "A" ? "强信号" : "达标信号";
+export function dailyFocusCandidateStrength(grade: "A" | "B"): "核心聚焦" | "观察聚焦" {
+  return grade === "A" ? "核心聚焦" : "观察聚焦";
 }
 
 /** Historical dates are immutable; only the current trading-day view needs polling. */
@@ -47,12 +47,18 @@ export function dailyFocusLeadership(
   return { tier, label, bonus: asNumber(leadership.bonus) ?? 0, reasons };
 }
 
-/** 最终分的构成文案：基础六维 + 龙头加分 − 过热扣分。 */
+/**
+ * 旧冻结记录的最终分构成文案（V7 记录改用研究/热度展示）。
+ * 调整项可能为负（重复扣分大于持续加分），所以不能只取 Math.max(0, …)，否则等式对不上。
+ */
 export function dailyFocusScoreBreakdown(entry: { baseScore: number; finalScore: number; overheatPenalty: number }): string {
-  const bonus = Math.max(0, entry.finalScore - entry.baseScore + entry.overheatPenalty);
-  return bonus > 0
-    ? `基础 ${entry.baseScore.toFixed(1)} + 龙头 ${bonus.toFixed(1)} − 过热 ${entry.overheatPenalty.toFixed(1)}`
-    : `基础 ${entry.baseScore.toFixed(1)} − 过热 ${entry.overheatPenalty.toFixed(1)}`;
+  const adjustment = entry.finalScore - entry.baseScore + entry.overheatPenalty;
+  const parts = [`基础 ${entry.baseScore.toFixed(1)}`];
+  if (adjustment > 0) parts.push(`+ 调整 ${adjustment.toFixed(1)}`);
+  else if (adjustment < 0) parts.push(`− 调整 ${Math.abs(adjustment).toFixed(1)}`);
+  parts.push(`− 风险 ${entry.overheatPenalty.toFixed(1)}`);
+  parts.push(`= ${entry.finalScore.toFixed(1)}`);
+  return parts.join(" ");
 }
 
 /**
@@ -81,6 +87,83 @@ export function dailyFocusBoardMixText(codes: string[]): string {
 /** 候选板块标签；未知前缀不猜板块。 */
 export function dailyFocusBoardLabel(code: string): string | null {
   return marketBoardOf(code);
+}
+
+/**
+ * 证据模式（设计 §33）：
+ * - full：行情 + 公告权威源 + 讨论基线都可用；
+ * - market+authority：有公告，但讨论源覆盖不足；
+ * - market-only：连公告权威源都不可用，此时不可能产生事件通道。
+ */
+export type DailyFocusDataMode = "full" | "market+authority" | "market-only";
+
+export function dailyFocusDataMode(quality: Record<string, unknown>): DailyFocusDataMode {
+  const authority = asString(quality.authority);
+  const discussion = asString(quality.discussion);
+  if (authority !== "available") return "market-only";
+  return discussion === "covered" || discussion === "available" ? "full" : "market+authority";
+}
+
+export function dailyFocusDataModeLabel(mode: DailyFocusDataMode): string {
+  return mode === "full" ? "完整证据" : mode === "market+authority" ? "市场 + 公告" : "仅市场";
+}
+
+/** 页面必须写清楚当前榜单是什么构成的；完整证据时不需要提示。 */
+export function dailyFocusDataModeNotice(mode: DailyFocusDataMode): string | null {
+  if (mode === "full") return null;
+  return mode === "market+authority"
+    ? "讨论源覆盖不足：关注度加速信号缺失，榜单以公告事件与量价趋势为主。"
+    : "文本证据不足：当日无法产生事件通道，榜单主要由市场趋势与热度信号构成。";
+}
+
+/** 榜单实测构成：选出的股票里有没有真正走事件通道的。 */
+export function dailyFocusLaneNotice(lanes: Array<unknown>): string | null {
+  const values = lanes.map((value) => asString(value));
+  if (!values.length) return null;
+  return values.some((lane) => lane === "event" || lane === "dual")
+    ? null
+    : "本日没有股票达到事件通道门槛，榜单全部来自量价趋势与当前热度。";
+}
+
+export function dailyFocusLaneLabel(lane: unknown): string | null {
+  const value = asString(lane);
+  return value === "dual" ? "事件+趋势" : value === "event" ? "事件突破" : value === "trend" ? "趋势延续" : null;
+}
+
+export function dailyFocusFocusTypeLabel(focusType: unknown): string | null {
+  const value = asString(focusType);
+  return value === "research-hot" ? "研究+热点" : value === "research" ? "两周研究" : value === "hot" ? "当前热点" : null;
+}
+
+/**
+ * V7 双目标分项；旧冻结记录没有这些字段时返回 null，界面回落到旧的六维展示。
+ * 未达门槛的通道标成「未达门槛」，避免把没有计入研究分的分数当成已计入。
+ */
+export function dailyFocusV7ScoreRows(
+  snapshot: Record<string, unknown>,
+): Array<{ label: string; value: string; detail: string }> | null {
+  const researchScore2W = asNumber(snapshot.researchScore2W);
+  const hotScore = asNumber(snapshot.hotScore);
+  if (researchScore2W === null || hotScore === null) return null;
+  const eventScore = asNumber(snapshot.eventScore) ?? 0;
+  const trendScore = asNumber(snapshot.trendScore) ?? 0;
+  const lane = asString(snapshot.lane);
+  const eventCounted = lane === "event" || lane === "dual";
+  const trendCounted = lane === "trend" || lane === "dual";
+  return [
+    { label: "研究价值（约两周）", value: researchScore2W.toFixed(1), detail: lane ? `通道：${dailyFocusLaneLabel(lane) ?? lane}` : "未进入事件/趋势通道" },
+    { label: "当前热度", value: hotScore.toFixed(1), detail: "研究 80% + 热度 20% 中的热度项" },
+    {
+      label: "事件得分",
+      value: eventCounted ? eventScore.toFixed(1) : "未达门槛",
+      detail: eventCounted ? "已计入研究分" : "事件重要度或新鲜度不足，未计入研究分",
+    },
+    {
+      label: "趋势得分",
+      value: trendCounted ? trendScore.toFixed(1) : "未达门槛",
+      detail: trendCounted ? "已计入研究分" : "成交趋势或价格强度不足，未计入研究分",
+    },
+  ];
 }
 
 /** 排除计数使用中文口径，避免页面上直接出现英文键名。 */

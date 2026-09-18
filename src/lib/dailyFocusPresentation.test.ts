@@ -19,8 +19,8 @@ test("renders performance phases in Chinese for the daily-focus audit", () => {
   assert.equal(dailyFocusSourceKind("news"), "新闻");
   assert.equal(dailyFocusSourceKind("announcement"), "公告");
   assert.equal(dailyFocusSourceKind("forum"), "论坛");
-  assert.equal(dailyFocusCandidateStrength("A"), "强信号");
-  assert.equal(dailyFocusCandidateStrength("B"), "达标信号");
+  assert.equal(dailyFocusCandidateStrength("A"), "核心聚焦");
+  assert.equal(dailyFocusCandidateStrength("B"), "观察聚焦");
 });
 
 test("daily focus status keeps preview, frozen, reconstructed and unavailable audit meanings distinct", () => {
@@ -109,10 +109,15 @@ test("separates certified leaders from unverified leadership snapshots", () => {
   assert.equal(dailyFocusLeadership({ leadership: { tier: "industry", boardCount: 2 } })?.label, "行业龙头", "缺少 label 时回落到层级名称");
 });
 
-test("explains the final score as base plus leadership bonus minus overheat", () => {
-  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 62, overheatPenalty: 0 }), "基础 62.0 − 过热 0.0");
-  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 70, overheatPenalty: 2 }), "基础 62.0 + 龙头 10.0 − 过热 2.0");
-  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 53, overheatPenalty: 9 }), "基础 62.0 − 过热 9.0", "旧记录不会凭空出现龙头加分");
+test("explains the legacy final score without hiding a negative adjustment", () => {
+  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 62, overheatPenalty: 0 }), "基础 62.0 − 风险 0.0 = 62.0");
+  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 70, overheatPenalty: 2 }), "基础 62.0 + 调整 10.0 − 风险 2.0 = 70.0");
+  assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 53, overheatPenalty: 9 }), "基础 62.0 − 风险 9.0 = 53.0", "旧记录不会凭空出现调整加分");
+  assert.equal(
+    dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 57, overheatPenalty: 2 }),
+    "基础 62.0 − 调整 3.0 − 风险 2.0 = 57.0",
+    "重复扣分大于持续加分时必须显示负调整，而不是被 Math.max(0, …) 吞掉",
+  );
 });
 
 test("counts the frozen board mix and keeps unknown prefixes apart", () => {

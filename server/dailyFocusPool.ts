@@ -39,6 +39,28 @@ export interface DailyFocusPoolSource {
   leadershipByDate?: Map<string, LeadershipDayRow[]>;
 }
 
+export type DailyFocusPoolLane = "event" | "trend" | "dual" | null;
+export type DailyFocusPoolFocusType = "research" | "hot" | "research-hot" | null;
+
+/** 逐日聚焦理由：为什么这只股票连续几天仍在名单里（设计 §36）。 */
+export interface DailyFocusPoolFocusPoint {
+  tradeDate: string;
+  lane: DailyFocusPoolLane;
+  focusType: DailyFocusPoolFocusType;
+  primaryEventTitle: string | null;
+}
+
+export interface DailyFocusPoolFocus {
+  /** 最近一个聚焦日的通道 / 产品类型 / 核心事件。 */
+  lane: DailyFocusPoolLane;
+  focusType: DailyFocusPoolFocusType;
+  primaryEventTitle: string | null;
+  /** 窗口内通道、类型或核心事件是否发生过变化。 */
+  changed: boolean;
+  /** 按日期升序的逐日理由；旧冻结记录没有这些字段时 lane/focusType 为 null。 */
+  timeline: DailyFocusPoolFocusPoint[];
+}
+
 /** 池内一只股票在观察窗口内的龙头表现。 */
 export interface DailyFocusPoolLeadership {
   isLeader: boolean;
@@ -71,6 +93,8 @@ export interface DailyFocusPoolItem {
   downDays: number;
   flatDays: number;
   trend: { direction: DailyFocusPoolTrendDirection; label: string; summary: string };
+  /** 逐日聚焦理由（通道 / 产品类型 / 核心事件）。 */
+  focus: DailyFocusPoolFocus;
   leadership: DailyFocusPoolLeadership;
 }
 
@@ -111,6 +135,8 @@ export interface DailyFocusPoolResponse {
 
 const record = (value: unknown): Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const string = (value: unknown): string | null => typeof value === "string" && value.trim() ? value.trim() : null;
+const laneOf = (value: unknown): DailyFocusPoolLane => value === "event" || value === "trend" || value === "dual" ? value : null;
+const focusTypeOf = (value: unknown): DailyFocusPoolFocusType => value === "research" || value === "hot" || value === "research-hot" ? value : null;
 const finite = (value: unknown): number | null => typeof value === "number" && Number.isFinite(value) ? value : null;
 const round = (value: number) => Math.round(value * 10_000) / 10_000;
 
@@ -264,6 +290,20 @@ export function buildDailyFocusPool(source: DailyFocusPoolSource): DailyFocusPoo
       }
     }
     for (const date of tradeDates) addIndustry({ name: quoteMaps.get(date)?.get(code)?.industryName, source: "primary" });
+    // 逐日聚焦理由：读取每天冻结快照里的通道 / 产品类型 / 核心事件。
+    // 旧冻结记录（v6 及更早）没有这些字段，按 null 留白，不猜测。
+    const focusTimeline = values.map((value): DailyFocusPoolFocusPoint => {
+      const snapshot = record(value.item.snapshot);
+      const primaryEvent = record(snapshot.primaryEvent);
+      return {
+        tradeDate: value.tradeDate,
+        lane: laneOf(snapshot.lane),
+        focusType: focusTypeOf(snapshot.focusType),
+        primaryEventTitle: string(primaryEvent.title),
+      };
+    });
+    const latestFocus = focusTimeline.at(-1)!;
+    const focusChanged = new Set(focusTimeline.map((point) => `${point.lane ?? "-"}|${point.focusType ?? "-"}|${point.primaryEventTitle ?? "-"}`)).size > 1;
     const latestOccurrence = values.at(-1)!;
     const latestSnapshot = record(latestOccurrence.item.snapshot);
     const latestQuote = [...tradeDates].reverse().map((date) => quoteMaps.get(date)?.get(code)).find(Boolean);
@@ -290,6 +330,13 @@ export function buildDailyFocusPool(source: DailyFocusPoolSource): DailyFocusPoo
       downDays,
       flatDays,
       trend: analyzeTrend(priceHistory, windowPctChange),
+      focus: {
+        lane: latestFocus.lane,
+        focusType: latestFocus.focusType,
+        primaryEventTitle: latestFocus.primaryEventTitle,
+        changed: focusChanged,
+        timeline: focusTimeline,
+      },
       leadership: leadershipOf(code),
     };
   }).sort((left, right) => Number(right.leadership.isLeader) - Number(left.leadership.isLeader) || Number(right.isHotIndustry) - Number(left.isHotIndustry) || (right.windowPctChange ?? -Infinity) - (left.windowPctChange ?? -Infinity) || right.focusDates.length - left.focusDates.length || left.code.localeCompare(right.code));

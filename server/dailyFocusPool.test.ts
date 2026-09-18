@@ -233,3 +233,36 @@ test("keeps the latest trading day aware when the service only passes the anchor
   assert.equal(pool.window.latestTradeDate, "2026-08-31");
   assert.equal(pool.window.isLatest, false, "只传窗口内行情时，历史窗口不能被误判成最新窗口");
 });
+
+test("keeps a per-day focus reason timeline so repeated names explain themselves", () => {
+  const windowDates = dates.slice(-3);
+  const quotesByDate = new Map(windowDates.map((tradeDate) => [tradeDate, [
+    quote(tradeDate, "600001", 10, 1),
+    quote(tradeDate, "600002", 10, 1),
+  ]]));
+  const focusEntry = (tradeDate: string, code: string, lane: string, focusType: string, title: string) => entry(code, {
+    snapshot: { name: `股票${code}`, industry: { name: "半导体" }, events: [], lane, focusType, primaryEvent: { title } },
+  });
+  const lists = [
+    { tradeDate: windowDates[0]!, items: [focusEntry(windowDates[0]!, "600001", "event", "research", "签署重大合同")] },
+    { tradeDate: windowDates[1]!, items: [focusEntry(windowDates[1]!, "600001", "dual", "research-hot", "签署重大合同的进展")] },
+    { tradeDate: windowDates[2]!, items: [focusEntry(windowDates[2]!, "600001", "dual", "research-hot", "签署重大合同的进展"), entry("600002")] },
+  ];
+  const pool = buildDailyFocusPool({ tradeDates: dates, windowSessions: 3, lists, quotesByDate });
+
+  const tracked = pool.items.find((item) => item.code === "600001")!;
+  assert.deepEqual(tracked.focus.timeline.map((point) => [point.tradeDate, point.lane, point.focusType]), [
+    [windowDates[0], "event", "research"],
+    [windowDates[1], "dual", "research-hot"],
+    [windowDates[2], "dual", "research-hot"],
+  ]);
+  assert.equal(tracked.focus.changed, true, "通道或核心事件变化过就标记 changed");
+  assert.equal(tracked.focus.lane, "dual", "取最近一个聚焦日");
+  assert.equal(tracked.focus.focusType, "research-hot");
+  assert.equal(tracked.focus.primaryEventTitle, "签署重大合同的进展");
+
+  const legacy = pool.items.find((item) => item.code === "600002")!;
+  assert.deepEqual(legacy.focus.timeline, [{ tradeDate: windowDates[2], lane: null, focusType: null, primaryEventTitle: null }]);
+  assert.equal(legacy.focus.changed, false, "旧冻结记录没有通道字段时留白，不猜测");
+  assert.equal(legacy.focus.lane, null);
+});
