@@ -359,6 +359,7 @@
   .daily-focus-section-head h2 { margin-top: 0.25rem; font-size: 0.9375rem; font-weight: 620; }
   .daily-focus-section-head h2 span { margin-left: .35rem; color: var(--muted-foreground); font-size: .75rem; font-weight: 400; }
   .daily-focus-section-head > p { max-width: 32rem; color: var(--muted-foreground); font-size: .6875rem; text-align: right; }
+  .daily-focus-board-mix { margin-top: .3rem; color: var(--foreground); font-size: .6875rem; font-variant-numeric: tabular-nums; text-align: right; }
   .daily-focus-columns, .daily-focus-row { display: grid; grid-template-columns: minmax(12rem, 1.8fr) 5.2rem 5.7rem minmax(8.5rem, 1.05fr) minmax(8.5rem, 1.05fr) 5rem; gap: .75rem; align-items: center; }
   .daily-focus-columns { padding: .55rem .75rem; color: var(--muted-foreground); font-size: .625rem; letter-spacing: .07em; text-transform: uppercase; }
   .daily-focus-columns span:not(:first-child) { text-align: right; }
@@ -420,6 +421,7 @@
     .daily-focus-performance-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .daily-focus-section-head { align-items: start; flex-direction: column; gap: .55rem; }
     .daily-focus-section-head > p { text-align: left; }
+    .daily-focus-board-mix { text-align: left; }
   }
   @media (prefers-reduced-motion: reduce) {
     .daily-focus-detail, .daily-focus-detail-inner, .daily-focus-expand svg { transition: none !important; }

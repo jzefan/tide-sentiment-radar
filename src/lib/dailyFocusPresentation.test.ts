@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { DAILY_FOCUS_REFRESH_MS, dailyFocusCandidateStrength, dailyFocusDateOptions, dailyFocusExclusionLabel, dailyFocusIndustryLabel, dailyFocusLeadership, dailyFocusPhase, dailyFocusScoreBreakdown, dailyFocusSourceKind, dailyFocusStatus, discussionBaselineMedian, industryNewsScore, keepDailyFocusPayload, qualityEntries, scoreRows, shouldPollDailyFocus } from "./dailyFocusPresentation";
+import { DAILY_FOCUS_REFRESH_MS, dailyFocusBoardCounts, dailyFocusBoardLabel, dailyFocusBoardMixText, dailyFocusCandidateStrength, dailyFocusDateOptions, dailyFocusExclusionLabel, dailyFocusIndustryLabel, dailyFocusLeadership, dailyFocusPhase, dailyFocusScoreBreakdown, dailyFocusSourceKind, dailyFocusStatus, discussionBaselineMedian, industryNewsScore, keepDailyFocusPayload, qualityEntries, scoreRows, shouldPollDailyFocus } from "./dailyFocusPresentation";
 
 test("polls only the current daily-focus view every minute and retains stale payloads on refresh failure", () => {
   assert.equal(DAILY_FOCUS_REFRESH_MS, 60_000);
@@ -113,4 +113,23 @@ test("explains the final score as base plus leadership bonus minus overheat", ()
   assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 62, overheatPenalty: 0 }), "基础 62.0 − 过热 0.0");
   assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 70, overheatPenalty: 2 }), "基础 62.0 + 龙头 10.0 − 过热 2.0");
   assert.equal(dailyFocusScoreBreakdown({ baseScore: 62, finalScore: 53, overheatPenalty: 9 }), "基础 62.0 − 过热 9.0", "旧记录不会凭空出现龙头加分");
+});
+
+test("counts the frozen board mix and keeps unknown prefixes apart", () => {
+  const counts = dailyFocusBoardCounts(["600519", "601138", "603318", "002594", "002415", "003816", "300308", "301029", "688256", "689009"]);
+  assert.deepEqual(counts, { counts: { 主板: 3, 中小板: 3, 创业板: 2, 科创板: 2 }, unknown: 0 });
+  assert.equal(
+    dailyFocusBoardMixText(["600519", "600519", "600519", "002594", "002594", "002594", "300308", "300308", "688256", "688256"]),
+    "主板 3 · 中小板 3 · 创业板 2 · 科创板 2",
+  );
+  assert.equal(dailyFocusBoardMixText(["600519", "430001"]), "主板 1 · 中小板 0 · 创业板 0 · 科创板 0 · 其他 1", "北交所等未知前缀单独计数");
+  assert.equal(dailyFocusBoardMixText([]), "主板 0 · 中小板 0 · 创业板 0 · 科创板 0");
+});
+
+test("labels a candidate board without guessing unknown prefixes", () => {
+  assert.equal(dailyFocusBoardLabel("002594"), "中小板");
+  assert.equal(dailyFocusBoardLabel("300308"), "创业板");
+  assert.equal(dailyFocusBoardLabel("688256"), "科创板");
+  assert.equal(dailyFocusBoardLabel("830001"), null);
+  assert.equal(dailyFocusBoardLabel(""), null);
 });

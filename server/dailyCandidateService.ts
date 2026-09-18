@@ -561,6 +561,8 @@ function entry(item: DailyCandidateScored, evidence: SentimentEvent[], industryN
     scores: item.scores,
     snapshot: {
       ...item.inputAudit, industry: item.industry, discussionGrowth: item.discussionGrowth,
+      // 板块只由代码前缀决定，落档后界面不用重复实现一套分类。
+      board: item.board,
       leadership: leadership ? { ...leadership, bonus: item.leadershipBonus, label: leadershipText } : null,
       events: evidence.map((event) => ({ id: event.id, title: event.title, source: event.source, sourceKind: event.sourceKind, tone: event.tone, confidence: event.confidence, heat: event.heat, publishedAt: event.publishedAt, ...(event.url ? { url: event.url } : {}) })),
       industryNewsEvidence: industryNews?.evidence ?? [],
@@ -569,6 +571,7 @@ function entry(item: DailyCandidateScored, evidence: SentimentEvent[], industryN
       "成交额趋势确认",
       "当日上涨且跑赢市场",
       evidence.length ? "文本或讨论提供加分" : "文本与讨论缺失，按市场信号入选",
+      item.board ? `板块：${item.board}` : "板块未识别（未知代码前缀）",
       item.industry ? `行业：${item.industry.name}${industryNewsReason ? ` · ${industryNewsReason}` : ""}` : "行业数据缺失",
       // 龙头是外部可核验事实（涨停池 + 龙虎榜），单独列出判定依据，便于逐条复核。
       item.leadershipTier !== "none" && leadershipText

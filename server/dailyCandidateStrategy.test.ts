@@ -599,3 +599,78 @@ test("never lets a first board reach leader-level bonus", () => {
   assert.ok(capped.leadershipBonus <= 5, "连板但不是龙头的涨停股加分封顶 5 分");
   assert.ok(leader.leadershipBonus > capped.leadershipBonus, "龙头加分必须高于同日的普通连板");
 });
+
+const boardBase = (code: string, industryName: string) => base({
+  code,
+  industry: { name: industryName, textHeat: 82, textDirection: 58, marketStrength: 72, breadth: 76, relation: "舆情交易双热" },
+});
+
+test("keeps the recommended 3:3:2:2 board mix when every board has enough candidates", () => {
+  const inputs = [
+    boardBase("600001", "半导体"), boardBase("600002", "半导体"), boardBase("600003", "半导体"), boardBase("600004", "银行"), boardBase("600005", "银行"),
+    boardBase("002001", "家电"), boardBase("002002", "家电"), boardBase("002003", "家电"), boardBase("002004", "医药"), boardBase("002005", "医药"),
+    boardBase("300001", "电池"), boardBase("300002", "电池"), boardBase("300003", "软件"), boardBase("300004", "软件"),
+    boardBase("688001", "芯片"), boardBase("688002", "芯片"), boardBase("688003", "光伏"), boardBase("688004", "光伏"),
+  ];
+  const result = selected(...inputs);
+  assert.equal(result.items.length, 10, "候选充足时必须凑满 10 只");
+  assert.deepEqual(result.selectionDiagnostics.boardQuota.selected, { 主板: 3, 中小板: 3, 创业板: 2, 科创板: 2, 未知: 0 });
+  assert.deepEqual(result.selectionDiagnostics.boardQuota.quotas, { 主板: 3, 中小板: 3, 创业板: 2, 科创板: 2 });
+  assert.equal(result.selectionDiagnostics.boardQuota.shortfall, 0, "每个板块都能填满推荐名额");
+  assert.equal(result.selectionDiagnostics.boardQuota.relaxedBoardQuotas, false);
+  assert.deepEqual(result.items.map((item) => item.board).sort(), ["中小板", "中小板", "中小板", "主板", "主板", "主板", "创业板", "创业板", "科创板", "科创板"]);
+});
+
+test("gives up a board's slots when it has no qualified candidate and still fills ten", () => {
+  const inputs = [
+    boardBase("600001", "半导体"), boardBase("600002", "半导体"), boardBase("600003", "半导体"), boardBase("600004", "银行"), boardBase("600005", "银行"),
+    boardBase("002001", "家电"), boardBase("002002", "家电"), boardBase("002003", "家电"), boardBase("002004", "医药"), boardBase("002005", "医药"),
+    boardBase("300001", "电池"), boardBase("300002", "电池"), boardBase("300003", "软件"), boardBase("300004", "软件"), boardBase("300005", "传媒"),
+  ];
+  const result = selected(...inputs);
+  assert.equal(result.items.length, 10, "科创板没有候选，名额要让给其他板块并保持 10 只");
+  assert.equal(result.selectionDiagnostics.boardQuota.qualified["科创板"], 0);
+  assert.equal(result.selectionDiagnostics.boardQuota.shortfall, 2, "科创板让出 2 个名额");
+  assert.equal(result.selectionDiagnostics.boardQuota.relaxedBoardQuotas, true);
+  const { 主板, 中小板, 创业板, 科创板 } = result.selectionDiagnostics.boardQuota.selected;
+  assert.equal(科创板, 0);
+  assert.ok(主板 + 中小板 + 创业板 === 10);
+  assert.ok(主板 > 3 || 中小板 > 3 || 创业板 > 2, "多出来的名额由候选更多的板块承接");
+  assert.ok(result.selectionDiagnostics.reasons.includes("board quota relaxed to fill the target"));
+});
+
+test("lets one board dominate only when the others cannot supply the target", () => {
+  // 只有主板有合格候选：此时不应为了配额而空着名额。
+  const inputs = ["600001", "600002", "600003", "600004", "600005", "600006", "600007", "600008"]
+    .map((code, index) => boardBase(code, `行业${index}`));
+  const result = selected(...inputs);
+  assert.equal(result.items.length, 8, "总量不足 10 时按实际合格数量冻结");
+  assert.equal(result.selectionDiagnostics.boardQuota.selected["主板"], 8);
+  assert.equal(result.selectionDiagnostics.boardQuota.relaxedBoardQuotas, true);
+});
+
+test("keeps unknown board prefixes out of the quota race but still selectable as fill", () => {
+  const unknown = boardBase("609999", "其他");
+  const quotaBoards = [
+    boardBase("600001", "半导体"), boardBase("600002", "银行"), boardBase("600003", "券商"),
+    boardBase("002001", "家电"), boardBase("002002", "医药"), boardBase("002003", "食品"),
+    boardBase("300001", "电池"), boardBase("300002", "软件"),
+    boardBase("688001", "芯片"), boardBase("688002", "光伏"),
+  ];
+  const full = selected(...quotaBoards, unknown);
+  assert.equal(full.scored.find((item) => item.code === "609999")!.board, null, "未知板块不猜测归属");
+  assert.equal(full.selectionDiagnostics.boardQuota.qualified["未知"], 1);
+  assert.equal(full.selectionDiagnostics.boardQuota.selected["未知"], 0, "四个板块能填满 10 只时，未知板块不挤占配额");
+  assert.deepEqual(
+    ["主板", "中小板", "创业板", "科创板"].map((board) => full.selectionDiagnostics.boardQuota.selected[board as "主板"]),
+    [3, 3, 2, 2],
+  );
+  assert.equal(full.items.length, 10);
+
+  // 科创板少一只候选 → 空出的名额先给同样合格、但不在四个板块里的股票。
+  const short = selected(...quotaBoards.filter((item) => item.code !== "688002"), unknown);
+  assert.equal(short.items.length, 10);
+  assert.equal(short.selectionDiagnostics.boardQuota.selected["科创板"], 1);
+  assert.equal(short.selectionDiagnostics.boardQuota.selected["未知"], 1, "补位阶段未知板块可以入选");
+  assert.equal(short.items.some((item) => item.code === "609999"), true);
+});

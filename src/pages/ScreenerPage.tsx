@@ -48,6 +48,8 @@ import {
   asRecord,
   asString,
   dailyFocusCandidateStrength,
+  dailyFocusBoardLabel,
+  dailyFocusBoardMixText,
   dailyFocusDateOptions,
   dailyFocusExclusionLabel,
   dailyFocusIndustryLabel,
@@ -1086,8 +1088,7 @@ function DailyFocusPoolPanel({
           <div className="min-w-0">
             <h1 className="text-xl font-semibold tracking-tight">聚焦股票池</h1>
             <p className="mt-1 max-w-3xl text-sm leading-relaxed text-muted-foreground">
-              池内股票全部来自窗口内各交易日的「每日聚焦」名单（含当日预览），
-              再逐日核对涨停池与龙虎榜标注当前时段的龙头，并给出每只股票的趋势判断。
+              窗口内每日聚焦名单汇总，标注龙头与趋势。
             </p>
           </div>
           <Tabs
@@ -1171,10 +1172,7 @@ function DailyFocusPoolPanel({
             </SelectContent>
           </Select>
         </div>
-        <p>
-          可用窗口内的日期或「截止交易日」切换观察范围，例如点选 09-03
-          即以该日结束窗口；切换后股票范围、每天涨跌、总变动与趋势判断会同步重算。
-        </p>
+        <p>窗口内日期可直接点选为观察截止日。</p>
         {loading && payload && (
           <LoadingState label="正在切换观察窗口" />
         )}
@@ -1306,7 +1304,7 @@ function DailyFocusPoolPanel({
             <PoolMetric
               label="龙头占比"
               value={ratioLabel(payload.stats.leaderRatio)}
-              detail={`${payload.stats.leaders} / ${payload.stats.total} 只 · 窗口内曾为市场/行业龙头`}
+              detail={`${payload.stats.leaders} / ${payload.stats.total} 只 · 窗口内曾为龙头`}
               tone={payload.stats.leaders > 0 ? "up" : "neutral"}
             />
           </section>
@@ -1325,9 +1323,7 @@ function DailyFocusPoolPanel({
                     窗口内聚焦股票<em>{payload.items.length} 只</em>
                   </h2>
                 </div>
-                <p>
-                  龙头优先排列；每天的涨跌幅按对应交易日行情展示，总变动按窗口内每日涨跌复合计算。
-                </p>
+                <p>龙头优先排列。</p>
               </div>
               <div className="focus-pool-columns" aria-hidden="true">
                 <span>股票 / 聚焦日</span>
@@ -1359,12 +1355,11 @@ function DailyFocusPoolPanel({
           <footer className="focus-pool-footnote">
             <span>口径</span>
             <p>
-              股票范围只来自窗口内各交易日已正式冻结的每日聚焦名单
+              股票范围来自窗口内已冻结的每日聚焦名单
               {payload.window.livePreviewDate
-                ? `，加上 ${payload.window.livePreviewDate} 的当日预览`
+                ? `（含 ${payload.window.livePreviewDate} 预览）`
                 : ""}
-              ；总变动为所选窗口内每日涨跌幅的复合结果，涨、跌、平天数按每日行情统计。
-              趋势是价格路径的规则化描述；龙头标记来自涨停池与龙虎榜，且只在该交易日数据通过本地行情核对后才会出现，不是收益承诺。
+              ，总变动为每日涨跌幅的复合结果。趋势与龙头标记来自涨停池、龙虎榜，不是收益承诺。
             </p>
             <time>
               {payload.asOf
@@ -2535,6 +2530,10 @@ function DailyFocusPanel({
                 </div>
                 <p>
                   次日判断来自本日冻结信号；进入下一交易日后用实际涨跌幅持续验证。
+                  板块按推荐比例 主板:中小板:创业板:科创板 = 3:3:2:2 平衡，某板块没有合格候选时名额让给其他板块，尽量凑满 10 只。
+                </p>
+                <p className="daily-focus-board-mix">
+                  本次入选板块：{dailyFocusBoardMixText(payload.items.slice(0, 10).map((item) => item.code))}
                 </p>
               </div>
               <div className="daily-focus-columns" aria-hidden="true">
@@ -2628,7 +2627,10 @@ function LiveFocusFallback({ items }: { items: DailyFocusLiveItemResponse[] }) {
               </span>
               <span>
                 <strong>{item.name}</strong>
-                <small>{item.code}</small>
+                <small>
+                  {item.code} ·{" "}
+                  {dailyFocusBoardLabel(item.code) ?? "板块未识别"}
+                </small>
                 <small>{item.reasons.join(" · ")}</small>
               </span>
             </Link>
@@ -2870,6 +2872,7 @@ function DailyFocusCandidate({
             </span>
             <small>
               {item.code} ·{" "}
+              {dailyFocusBoardLabel(item.code) ?? "板块未识别"} ·{" "}
               {dailyFocusIndustryLabel(industryName, item.isHotIndustry)}
             </small>
             <small>

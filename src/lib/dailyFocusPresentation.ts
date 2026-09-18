@@ -1,4 +1,5 @@
 import type { DailyCandidateEntryResponse, DailyCandidateOrigin, DailyCandidateStatus } from "./api";
+import { MARKET_BOARDS, marketBoardOf, type MarketBoard } from "../domain/board";
 
 export type DailyFocusStatusTone = "up" | "down" | "warning" | "neutral";
 export const DAILY_FOCUS_REFRESH_MS = 60_000;
@@ -52,6 +53,34 @@ export function dailyFocusScoreBreakdown(entry: { baseScore: number; finalScore:
   return bonus > 0
     ? `基础 ${entry.baseScore.toFixed(1)} + 龙头 ${bonus.toFixed(1)} − 过热 ${entry.overheatPenalty.toFixed(1)}`
     : `基础 ${entry.baseScore.toFixed(1)} − 过热 ${entry.overheatPenalty.toFixed(1)}`;
+}
+
+/**
+ * 每日聚焦的板块分布：主板 / 中小板 / 创业板 / 科创板 各入选多少只。
+ * 未知前缀（B 股、未来新增代码段）单独计数，不混进四个板块。
+ */
+export function dailyFocusBoardCounts(codes: string[]): { counts: Record<MarketBoard, number>; unknown: number } {
+  const counts: Record<MarketBoard, number> = { 主板: 0, 中小板: 0, 创业板: 0, 科创板: 0 };
+  let unknown = 0;
+  for (const code of codes) {
+    const board = marketBoardOf(code);
+    if (board) counts[board] += 1;
+    else unknown += 1;
+  }
+  return { counts, unknown };
+}
+
+/** 板块分布文案，例如「主板 3 · 中小板 3 · 创业板 2 · 科创板 2」。 */
+export function dailyFocusBoardMixText(codes: string[]): string {
+  const { counts, unknown } = dailyFocusBoardCounts(codes);
+  const parts = MARKET_BOARDS.map((board) => `${board} ${counts[board]}`);
+  if (unknown) parts.push(`其他 ${unknown}`);
+  return parts.join(" · ");
+}
+
+/** 候选板块标签；未知前缀不猜板块。 */
+export function dailyFocusBoardLabel(code: string): string | null {
+  return marketBoardOf(code);
 }
 
 /** 排除计数使用中文口径，避免页面上直接出现英文键名。 */

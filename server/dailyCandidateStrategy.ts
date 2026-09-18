@@ -1,8 +1,15 @@
 import { sealMinutesFromOpen, type LeadershipTier } from "./leadership.ts";
+import { MARKET_BOARDS, marketBoardOf, type MarketBoard } from "../src/domain/board.ts";
 
 /** Pure, deterministic market-first selection policy (1–10 candidates + T+1 validation). */
-export const DAILY_FOCUS_VERSION = "daily-focus-v5";
+export const DAILY_FOCUS_VERSION = "daily-focus-v6";
 export const DAILY_FOCUS_WEIGHTS = { turnover: 30, direction: 18, discussion: 18, price: 18, industry: 12, reliability: 4 } as const;
+/**
+ * 板块配额的推荐比例（主板:中小板:创业板:科创板 = 3:3:2:2，合计 10）。
+ * 这是「推荐值」而不是硬约束：某个板块没有合格候选时，它的名额会让给其他板块；
+ * 某个板块候选很多时，也可以在补位阶段多拿几个，目标是尽量凑满 10 只。
+ */
+export const DAILY_FOCUS_BOARD_QUOTAS: Readonly<Record<MarketBoard, number>> = { 主板: 3, 中小板: 3, 创业板: 2, 科创板: 2 };
 /** 龙头加分上限：不改变六维基础分的 100 分制，只作为入选加分与排序依据。 */
 export const DAILY_FOCUS_LEADERSHIP_MAX = 12;
 /** 未达龙头标准的涨停股加分上限：涨停是事实，但用户要的是「当前时段的龙头」，不能让普通涨停挤掉龙头。 */
@@ -62,9 +69,21 @@ export interface AmountTrend { base: boolean; gradeA: boolean; gradeB: boolean; 
 export interface DiscussionGrowth { value: number; mentionDelta: number; countMedian: number; interactionsMedian: number; isComparable: boolean; }
 export interface ReferenceMetric { sampleSize: number; p5: number; p95: number; p99: number | null; }
 export interface ReferenceAudit { market: { amount: ReferenceMetric; pctChange: ReferenceMetric; marketExcess: ReferenceMetric; threeDayReturn: ReferenceMetric }; text: { discussionCount: ReferenceMetric; discussionInteractions: ReferenceMetric; discussionGrowth: ReferenceMetric }; trend: { slope: ReferenceMetric }; leadership: { boardCount: ReferenceMetric }; }
-export interface SelectionDiagnostics { initialTarget: number; requiredHot: number; relaxedIndustryConstraints: boolean; constraintTruncated: boolean; reasons: string[]; }
+export interface BoardQuotaDiagnostics {
+  /** 推荐的板块比例（3:3:2:2）。 */
+  quotas: Readonly<Record<MarketBoard, number>>;
+  /** 各板块进入候选的合格股票数量。 */
+  qualified: Record<MarketBoard | "未知", number>;
+  /** 各板块实际入选数量。 */
+  selected: Record<MarketBoard | "未知", number>;
+  /** 因为某板块合格候选不足而让出的名额。 */
+  shortfall: number;
+  /** 补位阶段是否放宽了板块配额（某个板块的入选数超过配额）。 */
+  relaxedBoardQuotas: boolean;
+}
+export interface SelectionDiagnostics { initialTarget: number; requiredHot: number; relaxedIndustryConstraints: boolean; constraintTruncated: boolean; boardQuota: BoardQuotaDiagnostics; reasons: string[]; }
 export interface LeadershipDiagnostics { covered: boolean; limitUpCandidates: number; marketLeaders: string[]; industryLeaders: string[]; }
-export interface DailyCandidateScored { code: string; inputAudit: Readonly<DailyCandidateInput>; scores: DailyCandidateScores; trend: AmountTrend; baseScore: number; overheatPenalty: number; leadershipBonus: number; finalScore: number; grade: "A" | "B" | null; isHotIndustry: boolean; industry: DailyCandidateIndustry | null; discussionGrowth: DiscussionGrowth; discussionGrowthScore: number; leadershipTier: LeadershipTier; }
+export interface DailyCandidateScored { code: string; board: MarketBoard | null; inputAudit: Readonly<DailyCandidateInput>; scores: DailyCandidateScores; trend: AmountTrend; baseScore: number; overheatPenalty: number; leadershipBonus: number; finalScore: number; grade: "A" | "B" | null; isHotIndustry: boolean; industry: DailyCandidateIndustry | null; discussionGrowth: DiscussionGrowth; discussionGrowthScore: number; leadershipTier: LeadershipTier; }
 export interface DailyCandidateResult { methodologyVersion: typeof DAILY_FOCUS_VERSION; status: "available" | "unavailable"; items: DailyCandidateScored[]; scored: DailyCandidateScored[]; exclusionCounts: Record<string, number>; referenceAudit: ReferenceAudit; selectionDiagnostics: SelectionDiagnostics; leadershipDiagnostics: LeadershipDiagnostics; }
 export const DAILY_FOCUS_BOUNDS = { directionStrength: [55, 86], amountRatio: [1, 2.5], independentEvents: [2, 5], sourceCount: [1, 3], closePosition: [0, 1] } as const;
 export const OVERHEAT_MIN_SAMPLE_SIZE = 100;
@@ -209,7 +228,7 @@ function score(input: DailyCandidateInput, refs: PreparedReferences): InternalSc
   const leadershipBonus = leadershipBonusOf(input, refs.leadership.boardCount);
   const finalScore = Math.round(clamp(baseScore + leadershipBonus - penalty));
   const grade = gradeCandidate({ scores, trend, finalScore, textDirection: input.textDirection });
-  return { raw: input, code: input.code, inputAudit, scores, trend, baseScore, overheatPenalty: penalty, leadershipBonus, finalScore, grade, isHotIndustry: hot(input.industry), industry: inputAudit.industry ?? null, discussionGrowth: growth, discussionGrowthScore: growthScore, leadershipTier: input.leadership?.tier ?? "none" };
+  return { raw: input, code: input.code, board: marketBoardOf(input.code), inputAudit, scores, trend, baseScore, overheatPenalty: penalty, leadershipBonus, finalScore, grade, isHotIndustry: hot(input.industry), industry: inputAudit.industry ?? null, discussionGrowth: growth, discussionGrowthScore: growthScore, leadershipTier: input.leadership?.tier ?? "none" };
 }
 export function overheatPenalty(input: Pick<DailyCandidateInput, "reopenedLimit" | "sourceCount" | "duplicateRatio">, amountRatio: number, topThreeDayReturn: boolean, topDiscussionGrowth: boolean): number { return Math.min(10, (input.reopenedLimit ? 3 : 0) + (topThreeDayReturn && amountRatio >= 2.5 ? 4 : 0) + (topDiscussionGrowth && (input.sourceCount <= 1 || (input.duplicateRatio ?? 0) >= .4) ? 3 : 0)); }
 export function gradeCandidate(candidate: Pick<DailyCandidateScored, "scores" | "trend" | "finalScore"> & { textDirection: number }): "A" | "B" | null {
@@ -228,34 +247,76 @@ export function gradeCandidate(candidate: Pick<DailyCandidateScored, "scores" | 
     && candidate.trend.base ? "B" : null;
 }
 const compare = (left: DailyCandidateScored, right: DailyCandidateScored) => right.finalScore - left.finalScore || right.leadershipBonus - left.leadershipBonus || right.scores.turnover - left.scores.turnover || right.discussionGrowthScore - left.discussionGrowthScore || right.scores.industry - left.scores.industry || (left.code < right.code ? -1 : left.code > right.code ? 1 : 0);
-function selectWithIndustry<T extends DailyCandidateScored>(candidates: T[], target: number): { items: T[]; diagnostics: SelectionDiagnostics } {
+const boardKeyOf = (code: string): MarketBoard | "未知" => marketBoardOf(code) ?? "未知";
+
+const emptyBoardCounts = (): Record<MarketBoard | "未知", number> => ({ 主板: 0, 中小板: 0, 创业板: 0, 科创板: 0, 未知: 0 });
+
+/**
+ * 板块配额 + 行业分散的确定性选取。
+ *
+ * 1. 热门行业优先：按全局分数顺序，先把热门行业且所在板块还有配额的名额填到 70%；
+ * 2. 配额填充：继续按全局分数顺序，每个板块最多拿 `quotas[板块]` 只（3:3:2:2）；
+ * 3. 补位：某些板块合格候选不足时名额会空出来，此时放宽板块配额，按全局分数把剩下的
+ *    名额补满（先受行业上限约束，仍不满再放宽行业上限），尽量凑满 10 只。
+ *
+ * 板块配额只决定「谁能进来」，最终展示顺序仍按分数排序。
+ */
+function selectWithIndustry<T extends DailyCandidateScored>(candidates: T[], target: number, quotas: Readonly<Record<MarketBoard, number>> = DAILY_FOCUS_BOARD_QUOTAS): { items: T[]; diagnostics: SelectionDiagnostics } {
   const selected: T[] = [];
   const selectedCodes = new Set<string>();
   const counts = new Map<string, number>();
+  const boardSelected = emptyBoardCounts();
   const requiredHot = Math.min(target, Math.ceil(target * .7));
   let relaxed = false;
-  const add = (item: T, strict: boolean) => {
+  const add = (item: T, strict: boolean, boardLimited: boolean) => {
     if (selectedCodes.has(item.code) || selected.length >= target) return false;
     const key = item.industry?.name ?? "__missing__";
     if (strict && (counts.get(key) ?? 0) >= 3) return false;
+    const board = boardKeyOf(item.code);
+    if (boardLimited) {
+      // 未知板块（B 股、未来新增前缀等）不占配额，但也不跟四个板块抢配额名额：
+      // 它只在补位阶段入选，保证推荐比例不被边缘情况打乱。
+      if (board === "未知") return false;
+      if (boardSelected[board] >= (quotas[board] ?? 0)) return false;
+    }
     selected.push(item);
     selectedCodes.add(item.code);
     counts.set(key, (counts.get(key) ?? 0) + 1);
+    boardSelected[board] += 1;
     return true;
   };
   const sortedCandidates = [...candidates].sort(compare);
   for (const item of sortedCandidates.filter((item) => item.isHotIndustry)) {
     if (selected.length >= requiredHot) break;
-    add(item, true);
+    add(item, true, true);
   }
-  for (const item of sortedCandidates) add(item, true);
-  // Industry concentration is a preference. If qualified supply is concentrated,
-  // relax the cap so the page still freezes every available slot up to ten.
+  for (const item of sortedCandidates) add(item, true, true);
+  // 配额阶段结束时各板块拿到了多少；没填满的名额就是让给其他板块的部分。
+  const boardFilledByQuota = { ...boardSelected };
+  const quotaShortfall = MARKET_BOARDS.reduce((sum, board) => sum + Math.max(0, (quotas[board] ?? 0) - boardFilledByQuota[board]), 0);
+  // 板块候选不足会让名额空出来：放宽板块配额补满（行业上限仍生效）。
   if (selected.length < target) {
-    relaxed = true;
-    for (const item of sortedCandidates) add(item, false);
+    for (const item of sortedCandidates) {
+      if (selected.length >= target) break;
+      add(item, true, false);
+    }
   }
+  // 行业集中只是偏好：供给集中在少数行业时进一步放宽，保住 10 个名额。
+  if (selected.length < target) {
+    for (const item of sortedCandidates) {
+      if (selected.length >= target) break;
+      if (add(item, false, false)) relaxed = true;
+    }
+  }
+  const qualifiedBoards = emptyBoardCounts();
+  for (const item of candidates) qualifiedBoards[boardKeyOf(item.code)] += 1;
+  const selectedOverQuota = MARKET_BOARDS.some((board) => boardSelected[board] > (quotas[board] ?? 0));
+  const boardRelaxed = quotaShortfall > 0 || selectedOverQuota;
   const truncated = selected.length < target;
+  const reasons = [
+    ...(truncated ? ["qualified candidates exhausted"] : []),
+    ...(boardRelaxed ? ["board quota relaxed to fill the target"] : []),
+  ];
   return {
     items: selected.sort(compare),
     diagnostics: deepFreeze({
@@ -263,7 +324,8 @@ function selectWithIndustry<T extends DailyCandidateScored>(candidates: T[], tar
       requiredHot,
       relaxedIndustryConstraints: relaxed,
       constraintTruncated: truncated,
-      reasons: truncated ? ["qualified candidates exhausted"] : [],
+      boardQuota: { quotas: { ...quotas }, qualified: qualifiedBoards, selected: boardSelected, shortfall: quotaShortfall, relaxedBoardQuotas: boardRelaxed },
+      reasons,
     }) as SelectionDiagnostics,
   };
 }
